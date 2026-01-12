@@ -386,12 +386,7 @@ class UPnP:
             xml_data = response.read().decode("utf-8")
             conn.close()
 
-            parser = ET.XMLParser()
-            parser.entity = {}
-            parser.parser.EntityDeclHandler = lambda *args: None
-            parser.parser.UnparsedEntityDeclHandler = lambda *args: None
-
-            root = ET.fromstring(xml_data, parser=parser)
+            root = ET.fromstring(xml_data)
 
             ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
             for service in root.findall(".//upnp:service", ns):
