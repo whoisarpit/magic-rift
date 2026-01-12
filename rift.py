@@ -9,6 +9,7 @@ import http.client
 import http.server
 import json
 import mimetypes
+import os
 import re
 import secrets
 import signal
@@ -19,8 +20,42 @@ import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+
+class RateLimiter:
+    """Rate limiter to prevent brute-force attacks."""
+
+    def __init__(self, max_attempts=10, window_seconds=60):
+        self.attempts = defaultdict(list)
+        self.max_attempts = max_attempts
+        self.window = timedelta(seconds=window_seconds)
+        self.blocked_ips = {}
+
+    def is_allowed(self, ip_address):
+        """Check if IP is allowed to make a request."""
+        now = datetime.now()
+
+        if ip_address in self.blocked_ips:
+            if now - self.blocked_ips[ip_address] < timedelta(minutes=5):
+                return False
+            else:
+                del self.blocked_ips[ip_address]
+
+        self.attempts[ip_address] = [
+            t for t in self.attempts[ip_address] if now - t < self.window
+        ]
+
+        if len(self.attempts[ip_address]) >= self.max_attempts:
+            self.blocked_ips[ip_address] = now
+            return False
+
+        self.attempts[ip_address].append(now)
+        return True
 
 
 def load_wordlist() -> Optional[list[str]]:
@@ -73,7 +108,9 @@ class Config:
     """Manage configuration for Rift."""
 
     def __init__(self, config_path: Optional[Path] = None):
-        self.config_path = config_path or Path.home() / ".rift" / "config.json"
+        self.config_path = (
+            config_path or Path.home() / ".config" / "rift" / "config.json"
+        )
         self.config = self._load_config()
 
     def _load_config(self) -> dict:
@@ -85,9 +122,10 @@ class Config:
 
     def save(self):
         """Save configuration to file."""
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.config_path, "w") as f:
             json.dump(self.config, f, indent=2)
+        os.chmod(self.config_path, 0o600)
 
     def get(self, key: str, default=None):
         """Get configuration value."""
@@ -171,7 +209,12 @@ class UPnP:
             xml_data = response.read().decode("utf-8")
             conn.close()
 
-            root = ET.fromstring(xml_data)
+            parser = ET.XMLParser()
+            parser.entity = {}
+            parser.parser.EntityDeclHandler = lambda *args: None
+            parser.parser.UnparsedEntityDeclHandler = lambda *args: None
+
+            root = ET.fromstring(xml_data, parser=parser)
 
             ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
             for service in root.findall(".//upnp:service", ns):
@@ -207,15 +250,21 @@ class UPnP:
         if not self.gateway_url or not self.control_url:
             return False
 
+        escaped_service_type = xml_escape(str(self.service_type))
+        escaped_external_port = xml_escape(str(external_port))
+        escaped_protocol = xml_escape(str(protocol))
+        escaped_internal_port = xml_escape(str(internal_port))
+        escaped_internal_ip = xml_escape(str(internal_ip))
+
         soap_body = f"""<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
-<u:AddPortMapping xmlns:u="{self.service_type}">
+<u:AddPortMapping xmlns:u="{escaped_service_type}">
 <NewRemoteHost></NewRemoteHost>
-<NewExternalPort>{external_port}</NewExternalPort>
-<NewProtocol>{protocol}</NewProtocol>
-<NewInternalPort>{internal_port}</NewInternalPort>
-<NewInternalClient>{internal_ip}</NewInternalClient>
+<NewExternalPort>{escaped_external_port}</NewExternalPort>
+<NewProtocol>{escaped_protocol}</NewProtocol>
+<NewInternalPort>{escaped_internal_port}</NewInternalPort>
+<NewInternalClient>{escaped_internal_ip}</NewInternalClient>
 <NewEnabled>1</NewEnabled>
 <NewPortMappingDescription>Rift File Share</NewPortMappingDescription>
 <NewLeaseDuration>0</NewLeaseDuration>
@@ -249,13 +298,17 @@ class UPnP:
         if not self.gateway_url or not self.control_url:
             return False
 
+        escaped_service_type = xml_escape(str(self.service_type))
+        escaped_external_port = xml_escape(str(external_port))
+        escaped_protocol = xml_escape(str(protocol))
+
         soap_body = f"""<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
-<u:DeletePortMapping xmlns:u="{self.service_type}">
+<u:DeletePortMapping xmlns:u="{escaped_service_type}">
 <NewRemoteHost></NewRemoteHost>
-<NewExternalPort>{external_port}</NewExternalPort>
-<NewProtocol>{protocol}</NewProtocol>
+<NewExternalPort>{escaped_external_port}</NewExternalPort>
+<NewProtocol>{escaped_protocol}</NewProtocol>
 </u:DeletePortMapping>
 </s:Body>
 </s:Envelope>"""
@@ -313,7 +366,17 @@ class RiftServer:
     """Main Rift server managing HTTP server."""
 
     def __init__(self, file_path: str, port: int = 8000):
+        if len(file_path) > 4096:
+            raise ValueError("File path too long (maximum 4096 characters)")
+
         self.file_path = Path(file_path).resolve()
+
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"File not found: {self.file_path}")
+
+        if not self.file_path.is_file():
+            raise ValueError("Path must be a file, not a directory")
+
         self.port = port
         self.http_server = None
         self.server_thread = None
@@ -322,6 +385,7 @@ class RiftServer:
         self.upnp_mapping_added = False
         self.secret_code = generate_secret_code()
         self.download_complete = False
+        self.rate_limiter = RateLimiter(max_attempts=10, window_seconds=60)
 
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -354,14 +418,6 @@ class RiftServer:
 
     def _create_http_server(self):
         """Create and configure HTTP server."""
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"File not found: {self.file_path}")
-
-        if self.file_path.is_dir():
-            raise ValueError(
-                "Directory sharing not supported with secret links. Please share a specific file."
-            )
-
         server_instance = self
 
         class SecretFileHandler(http.server.BaseHTTPRequestHandler):
@@ -373,6 +429,12 @@ class RiftServer:
 
             def do_GET(self):
                 """Handle GET request."""
+                client_ip = self.client_address[0]
+
+                if not server_instance.rate_limiter.is_allowed(client_ip):
+                    self.send_error(429, "Too Many Requests")
+                    return
+
                 parsed_path = urllib.parse.urlparse(self.path)
                 path = parsed_path.path.strip("/")
 
@@ -413,15 +475,23 @@ class RiftServer:
 
                     threading.Thread(target=server_instance.stop, daemon=True).start()
 
+                except FileNotFoundError:
+                    print(f"[ERROR] File not found: {server_instance.file_path}")
+                    self.send_error(404, "File not available")
+                except PermissionError:
+                    print(f"[ERROR] Permission denied: {server_instance.file_path}")
+                    self.send_error(403, "Access denied")
                 except Exception as e:
-                    self.send_error(500, f"Internal Server Error: {e}")
+                    print(f"[ERROR] Error serving file: {e}")
+                    self.send_error(500, "Internal server error")
 
+        bind_address = get_local_ip()
         self.http_server = socketserver.TCPServer(
-            ("0.0.0.0", self.port), SecretFileHandler
+            (bind_address, self.port), SecretFileHandler
         )
 
         print(f"[HTTP] Serving file: {self.file_path.name}")
-        print(f"[HTTP] Listening on port: {self.port}")
+        print(f"[HTTP] Listening on {bind_address}:{self.port}")
 
         return self.http_server
 
