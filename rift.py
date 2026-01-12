@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""
+Rift - Public file sharing via your public IP
+Share files directly from your PC via HTTP link.
+"""
+
+import argparse
+import http.client
+import http.server
+import json
+import mimetypes
+import re
+import secrets
+import signal
+import socket
+import socketserver
+import sys
+import threading
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Optional
+
+
+def load_wordlist() -> Optional[list[str]]:
+    """Load wordlist from bundled file."""
+    wordlist_path = Path(__file__).parent / "wordlist.txt"
+
+    if wordlist_path.exists():
+        try:
+            with open(wordlist_path, "r") as f:
+                words = [line.strip() for line in f if line.strip()]
+                if len(words) >= 100:
+                    return words
+        except Exception:
+            pass
+
+    return None
+
+
+def generate_pronounceable_word(length: int = 6) -> str:
+    """Generate a pronounceable random word using consonant-vowel patterns."""
+    consonants = "bcdfghjklmnprstvwxz"
+    vowels = "aeiou"
+
+    word = []
+    for i in range(length):
+        if i % 2 == 0:
+            word.append(secrets.choice(consonants))
+        else:
+            word.append(secrets.choice(vowels))
+
+    return "".join(word)
+
+
+def generate_secret_code() -> str:
+    """Generate a secret code like '4-forest-lunar' or '4-bavute-rofiso'."""
+    wordlist = load_wordlist()
+    number = secrets.randbelow(10)
+
+    if wordlist:
+        word1 = secrets.choice(wordlist)
+        word2 = secrets.choice(wordlist)
+    else:
+        word1 = generate_pronounceable_word(6)
+        word2 = generate_pronounceable_word(6)
+
+    return f"{number}-{word1}-{word2}"
+
+
+class Config:
+    """Manage configuration for Rift."""
+
+    def __init__(self, config_path: Optional[Path] = None):
+        self.config_path = config_path or Path.home() / ".rift" / "config.json"
+        self.config = self._load_config()
+
+    def _load_config(self) -> dict:
+        """Load configuration from file."""
+        if self.config_path.exists():
+            with open(self.config_path, "r") as f:
+                return json.load(f)
+        return {}
+
+    def save(self):
+        """Save configuration to file."""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_path, "w") as f:
+            json.dump(self.config, f, indent=2)
+
+    def get(self, key: str, default=None):
+        """Get configuration value."""
+        return self.config.get(key, default)
+
+    def set(self, key: str, value):
+        """Set configuration value."""
+        self.config[key] = value
+
+    def reset(self):
+        """Reset configuration to defaults."""
+        self.config = {}
+        if self.config_path.exists():
+            self.config_path.unlink()
+
+
+class UPnP:
+    """UPnP port forwarding manager."""
+
+    def __init__(self):
+        self.gateway_url = None
+        self.service_type = None
+        self.control_url = None
+
+    def discover_gateway(self) -> bool:
+        """Discover UPnP-enabled gateway."""
+        msg = (
+            "M-SEARCH * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            'MAN: "ssdp:discover"\r\n'
+            "MX: 2\r\n"
+            "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n"
+            "\r\n"
+        )
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(3)
+
+        try:
+            sock.sendto(msg.encode(), ("239.255.255.250", 1900))
+
+            while True:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    response = data.decode("utf-8", errors="ignore")
+
+                    location_match = re.search(
+                        r"LOCATION:\s*(.+)", response, re.IGNORECASE
+                    )
+                    if location_match:
+                        location = location_match.group(1).strip()
+                        if self._parse_location(location):
+                            return True
+                except socket.timeout:
+                    break
+        except Exception:
+            pass
+        finally:
+            sock.close()
+
+        return False
+
+    def _parse_location(self, location: str) -> bool:
+        """Parse gateway location and extract control URL."""
+        try:
+            if location.startswith("http://"):
+                location = location[7:]
+
+            host_port, path = location.split("/", 1)
+            path = "/" + path
+
+            if ":" in host_port:
+                host, port = host_port.split(":", 1)
+                port = int(port)
+            else:
+                host, port = host_port, 80
+
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", path)
+            response = conn.getresponse()
+            xml_data = response.read().decode("utf-8")
+            conn.close()
+
+            root = ET.fromstring(xml_data)
+
+            ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
+            for service in root.findall(".//upnp:service", ns):
+                service_type_elem = service.find("upnp:serviceType", ns)
+                if service_type_elem is not None:
+                    service_type = service_type_elem.text
+                    if (
+                        "WANIPConnection" in service_type
+                        or "WANPPPConnection" in service_type
+                    ):
+                        control_url_elem = service.find("upnp:controlURL", ns)
+                        if control_url_elem is not None:
+                            self.gateway_url = f"http://{host}:{port}"
+                            self.service_type = service_type
+                            self.control_url = control_url_elem.text
+                            if not self.control_url.startswith("/"):
+                                self.control_url = "/" + self.control_url
+                            return True
+
+        except Exception:
+            pass
+
+        return False
+
+    def add_port_mapping(
+        self,
+        external_port: int,
+        internal_port: int,
+        internal_ip: str,
+        protocol: str = "TCP",
+    ) -> bool:
+        """Add a port mapping via UPnP."""
+        if not self.gateway_url or not self.control_url:
+            return False
+
+        soap_body = f"""<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:AddPortMapping xmlns:u="{self.service_type}">
+<NewRemoteHost></NewRemoteHost>
+<NewExternalPort>{external_port}</NewExternalPort>
+<NewProtocol>{protocol}</NewProtocol>
+<NewInternalPort>{internal_port}</NewInternalPort>
+<NewInternalClient>{internal_ip}</NewInternalClient>
+<NewEnabled>1</NewEnabled>
+<NewPortMappingDescription>Rift File Share</NewPortMappingDescription>
+<NewLeaseDuration>0</NewLeaseDuration>
+</u:AddPortMapping>
+</s:Body>
+</s:Envelope>"""
+
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPAction": f'"{self.service_type}#AddPortMapping"',
+        }
+
+        try:
+            url_parts = self.gateway_url.replace("http://", "").split(":")
+            if len(url_parts) == 2:
+                host, port = url_parts[0], int(url_parts[1])
+            else:
+                host, port = url_parts[0], 80
+
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("POST", self.control_url, soap_body, headers)
+            response = conn.getresponse()
+            conn.close()
+
+            return response.status == 200
+        except Exception:
+            return False
+
+    def delete_port_mapping(self, external_port: int, protocol: str = "TCP") -> bool:
+        """Delete a port mapping via UPnP."""
+        if not self.gateway_url or not self.control_url:
+            return False
+
+        soap_body = f"""<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:DeletePortMapping xmlns:u="{self.service_type}">
+<NewRemoteHost></NewRemoteHost>
+<NewExternalPort>{external_port}</NewExternalPort>
+<NewProtocol>{protocol}</NewProtocol>
+</u:DeletePortMapping>
+</s:Body>
+</s:Envelope>"""
+
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPAction": f'"{self.service_type}#DeletePortMapping"',
+        }
+
+        try:
+            url_parts = self.gateway_url.replace("http://", "").split(":")
+            if len(url_parts) == 2:
+                host, port = url_parts[0], int(url_parts[1])
+            else:
+                host, port = url_parts[0], 80
+
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("POST", self.control_url, soap_body, headers)
+            response = conn.getresponse()
+            conn.close()
+
+            return response.status == 200
+        except Exception:
+            return False
+
+
+def get_local_ip() -> str:
+    """Get local IP address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def get_random_port() -> int:
+    """Get a random available port."""
+    for _ in range(10):
+        port = secrets.randbelow(2000) + 8000
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("", port))
+            sock.close()
+            return port
+        except OSError:
+            continue
+
+    return 8000
+
+
+class RiftServer:
+    """Main Rift server managing HTTP server."""
+
+    def __init__(self, file_path: str, port: int = 8000):
+        self.file_path = Path(file_path).resolve()
+        self.port = port
+        self.http_server = None
+        self.server_thread = None
+        self.public_ip = None
+        self.upnp = None
+        self.upnp_mapping_added = False
+        self.secret_code = generate_secret_code()
+        self.download_complete = False
+
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, sig, frame):
+        """Handle shutdown signals."""
+        print("\n\nShutting down Rift...")
+        self.stop()
+        sys.exit(0)
+
+    def _get_public_ip(self) -> Optional[str]:
+        """Detect public IP address."""
+        services = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://icanhazip.com",
+            "https://ipecho.net/plain",
+        ]
+
+        for service in services:
+            try:
+                with urllib.request.urlopen(service, timeout=5) as response:
+                    ip = response.read().decode("utf-8").strip()
+                    if ip:
+                        return ip
+            except Exception:
+                continue
+
+        return None
+
+    def _create_http_server(self):
+        """Create and configure HTTP server."""
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"File not found: {self.file_path}")
+
+        if self.file_path.is_dir():
+            raise ValueError(
+                "Directory sharing not supported with secret links. Please share a specific file."
+            )
+
+        server_instance = self
+
+        class SecretFileHandler(http.server.BaseHTTPRequestHandler):
+            """Custom handler that serves file behind secret URL."""
+
+            def log_message(self, format, *args):
+                """Log requests."""
+                print(f"[ACCESS] {self.address_string()} - {format % args}")
+
+            def do_GET(self):
+                """Handle GET request."""
+                parsed_path = urllib.parse.urlparse(self.path)
+                path = parsed_path.path.strip("/")
+
+                if path == server_instance.secret_code:
+                    self.serve_file()
+                else:
+                    self.send_error(404, "Not Found")
+
+            def serve_file(self):
+                """Serve the actual file and mark download complete."""
+                try:
+                    with open(server_instance.file_path, "rb") as f:
+                        file_size = server_instance.file_path.stat().st_size
+                        content = f.read()
+
+                    self.send_response(200)
+
+                    content_type, _ = mimetypes.guess_type(
+                        str(server_instance.file_path)
+                    )
+                    if content_type:
+                        self.send_header("Content-Type", content_type)
+                    else:
+                        self.send_header("Content-Type", "application/octet-stream")
+
+                    self.send_header("Content-Length", str(file_size))
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="{server_instance.file_path.name}"',
+                    )
+                    self.end_headers()
+                    self.wfile.write(content)
+
+                    print("\n[SUCCESS] File downloaded successfully!")
+                    print("[INFO] Shutting down server...")
+
+                    server_instance.download_complete = True
+
+                    threading.Thread(target=server_instance.stop, daemon=True).start()
+
+                except Exception as e:
+                    self.send_error(500, f"Internal Server Error: {e}")
+
+        self.http_server = socketserver.TCPServer(
+            ("0.0.0.0", self.port), SecretFileHandler
+        )
+
+        print(f"[HTTP] Serving file: {self.file_path.name}")
+        print(f"[HTTP] Listening on port: {self.port}")
+
+        return self.http_server
+
+    def _start_http_server(self):
+        """Start HTTP server in a separate thread."""
+        server = self._create_http_server()
+        self.server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        self.server_thread.start()
+
+    def start(self):
+        """Start the HTTP server."""
+        print("=" * 60)
+        print("Rift - Public File Sharing")
+        print("=" * 60)
+
+        try:
+            print("\n[UPnP] Discovering gateway...")
+            self.upnp = UPnP()
+
+            if self.upnp.discover_gateway():
+                print("[UPnP] Gateway found! Configuring port forwarding...")
+                local_ip = get_local_ip()
+                print(f"[UPnP] Local IP: {local_ip}")
+
+                if self.upnp.add_port_mapping(self.port, self.port, local_ip):
+                    print(f"[UPnP] Port {self.port} forwarded successfully")
+                    self.upnp_mapping_added = True
+                else:
+                    print("[UPnP] Failed to add port mapping")
+                    print("[UPnP] You may need to configure port forwarding manually")
+            else:
+                print("[UPnP] No UPnP-enabled gateway found")
+                print(
+                    "[UPnP] You'll need to manually forward port {} in your router".format(
+                        self.port
+                    )
+                )
+
+            print("\n[IP] Detecting public IP address...")
+            self.public_ip = self._get_public_ip()
+
+            if not self.public_ip:
+                print(
+                    "[IP] Warning: Could not detect public IP. You'll need to find it manually."
+                )
+                self.public_ip = "YOUR_PUBLIC_IP"
+
+            self._start_http_server()
+
+            public_url = f"http://{self.public_ip}:{self.port}/{self.secret_code}"
+
+            print("\n" + "=" * 60)
+            print("DISPOSABLE LINK (one-time use):")
+            print(f"  {public_url}")
+            print("=" * 60)
+
+            if self.public_ip != "YOUR_PUBLIC_IP":
+                print(f"\nYour public IP: {self.public_ip}")
+            print(f"Secret code: {self.secret_code}")
+            print(f"File: {self.file_path.name}")
+
+            if not self.upnp_mapping_added:
+                print("\nNote: UPnP port forwarding not available.")
+                print(
+                    "      Make sure port {} is manually forwarded in your router.".format(
+                        self.port
+                    )
+                )
+
+            print("\nWaiting for download... (Press Ctrl+C to cancel)\n")
+
+            while not self.download_complete:
+                import time
+
+                time.sleep(0.5)
+
+            import time
+
+            time.sleep(1)
+            sys.exit(0)
+
+        except Exception as e:
+            print(f"\nError: {e}", file=sys.stderr)
+            self.stop()
+            sys.exit(1)
+
+    def stop(self):
+        """Stop the HTTP server."""
+        if self.http_server:
+            print("[HTTP] Stopping HTTP server...")
+            self.http_server.shutdown()
+            self.http_server = None
+
+        if self.upnp and self.upnp_mapping_added:
+            print("[UPnP] Removing port forwarding...")
+            if self.upnp.delete_port_mapping(self.port):
+                print("[UPnP] Port mapping removed successfully")
+            else:
+                print("[UPnP] Warning: Could not remove port mapping")
+
+        print("Rift stopped.")
+
+
+def cmd_share(args):
+    """Handle the 'share' command."""
+    config = Config()
+
+    if args.port:
+        port = int(args.port)
+    elif config.get("port"):
+        port = int(config.get("port"))
+    else:
+        port = get_random_port()
+        print(f"[PORT] Using random port: {port}")
+
+    server = RiftServer(file_path=args.file, port=port)
+
+    server.start()
+
+
+def cmd_config(args):
+    """Handle the 'config' command."""
+    config = Config()
+
+    if args.action == "set":
+        if not args.key or not args.value:
+            print("Error: Both key and value are required for 'set'", file=sys.stderr)
+            sys.exit(1)
+
+        value = args.value
+        if args.key == "port":
+            try:
+                value = int(value)
+            except ValueError:
+                print("Error: Port must be a number", file=sys.stderr)
+                sys.exit(1)
+
+        config.set(args.key, value)
+        config.save()
+        print(f"Configuration saved: {args.key} = {value}")
+
+    elif args.action == "get":
+        if not args.key:
+            print(json.dumps(config.config, indent=2))
+        else:
+            value = config.get(args.key)
+            if value is not None:
+                print(f"{args.key} = {value}")
+            else:
+                print(f"No value set for: {args.key}", file=sys.stderr)
+
+    elif args.action == "list":
+        print(json.dumps(config.config, indent=2))
+
+    elif args.action == "reset":
+        config.reset()
+        print("Configuration reset to defaults")
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Rift - Share files via your public IP",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Share a file:
+    rift share document.pdf
+
+  Share on a custom port:
+    rift share document.pdf --port 9000
+
+  Configure default port:
+    rift config set port 9000
+
+  Reset configuration:
+    rift config reset
+
+  List configuration:
+    rift config list
+        """,
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    share_parser = subparsers.add_parser("share", help="Share a file or directory")
+    share_parser.add_argument("file", help="File or directory to share")
+    share_parser.add_argument(
+        "-p", "--port", type=int, help="Port to listen on (default: 8000)"
+    )
+    share_parser.set_defaults(func=cmd_share)
+
+    config_parser = subparsers.add_parser("config", help="Manage configuration")
+    config_parser.add_argument(
+        "action", choices=["set", "get", "list", "reset"], help="Configuration action"
+    )
+    config_parser.add_argument("key", nargs="?", help="Configuration key")
+    config_parser.add_argument("value", nargs="?", help="Configuration value")
+    config_parser.set_defaults(func=cmd_config)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
