@@ -15,6 +15,8 @@ import secrets
 import signal
 import socket
 import socketserver
+import ssl
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -22,7 +24,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -56,6 +58,181 @@ class RateLimiter:
 
         self.attempts[ip_address].append(now)
         return True
+
+
+class SSLCertificateManager:
+    """Manage SSL/TLS certificates."""
+
+    def __init__(self, cert_dir: Optional[Path] = None):
+        self.cert_dir = cert_dir or Path.home() / ".config" / "rift" / "certs"
+        self.cert_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def get_self_signed_cert(self, domain: str = "localhost") -> Tuple[Path, Path]:
+        """Generate or retrieve self-signed certificate."""
+        cert_path = self.cert_dir / "selfsigned.crt"
+        key_path = self.cert_dir / "selfsigned.key"
+
+        if cert_path.exists() and key_path.exists():
+            return cert_path, key_path
+
+        print("[SSL] Generating self-signed certificate...")
+
+        try:
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:4096",
+                    "-keyout",
+                    str(key_path),
+                    "-out",
+                    str(cert_path),
+                    "-days",
+                    "365",
+                    "-nodes",
+                    "-subj",
+                    f"/CN={domain}",
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            os.chmod(key_path, 0o600)
+            os.chmod(cert_path, 0o644)
+
+            print("[SSL] Self-signed certificate generated successfully")
+            return cert_path, key_path
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to generate certificate: {e.stderr.decode()}")
+        except FileNotFoundError:
+            raise RuntimeError(
+                "OpenSSL not found. Please install OpenSSL to use HTTPS."
+            )
+
+    def get_letsencrypt_cert(self, domain: str, email: str) -> Tuple[Path, Path]:
+        """Obtain Let's Encrypt certificate using ACME."""
+        cert_path = self.cert_dir / f"{domain}.crt"
+        key_path = self.cert_dir / f"{domain}.key"
+        account_key_path = self.cert_dir / "account.key"
+
+        if cert_path.exists() and key_path.exists():
+            if not self._cert_needs_renewal(cert_path):
+                print("[SSL] Using existing Let's Encrypt certificate")
+                return cert_path, key_path
+
+        print("[SSL] Obtaining Let's Encrypt certificate...")
+        print(
+            "[SSL] Note: This requires port 80 to be accessible for HTTP-01 challenge"
+        )
+
+        if not account_key_path.exists():
+            print("[SSL] Generating ACME account key...")
+            subprocess.run(
+                [
+                    "openssl",
+                    "genrsa",
+                    "-out",
+                    str(account_key_path),
+                    "4096",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            os.chmod(account_key_path, 0o600)
+
+        if not key_path.exists():
+            print("[SSL] Generating domain private key...")
+            subprocess.run(
+                [
+                    "openssl",
+                    "genrsa",
+                    "-out",
+                    str(key_path),
+                    "4096",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            os.chmod(key_path, 0o600)
+
+        csr_path = self.cert_dir / f"{domain}.csr"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-key",
+                str(key_path),
+                "-out",
+                str(csr_path),
+                "-subj",
+                f"/CN={domain}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        try:
+            subprocess.run(
+                [
+                    "certbot",
+                    "certonly",
+                    "--standalone",
+                    "--non-interactive",
+                    "--agree-tos",
+                    "--email",
+                    email,
+                    "-d",
+                    domain,
+                    "--cert-path",
+                    str(cert_path),
+                    "--key-path",
+                    str(key_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            print("[SSL] Let's Encrypt certificate obtained successfully")
+            return cert_path, key_path
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to obtain Let's Encrypt certificate: {e.stderr.decode()}"
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "Certbot not found. Please install certbot to use Let's Encrypt."
+            )
+
+    def _cert_needs_renewal(self, cert_path: Path) -> bool:
+        """Check if certificate needs renewal (< 30 days remaining)."""
+        try:
+            result = subprocess.run(
+                [
+                    "openssl",
+                    "x509",
+                    "-in",
+                    str(cert_path),
+                    "-noout",
+                    "-enddate",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            date_str = result.stdout.strip().replace("notAfter=", "")
+            expiry_date = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
+            days_remaining = (expiry_date - datetime.now()).days
+
+            return days_remaining < 30
+
+        except Exception:
+            return True
 
 
 def load_wordlist() -> Optional[list[str]]:
@@ -365,7 +542,16 @@ def get_random_port() -> int:
 class RiftServer:
     """Main Rift server managing HTTP server."""
 
-    def __init__(self, file_path: str, port: int = 8000):
+    def __init__(
+        self,
+        file_path: str,
+        port: int = 8000,
+        use_ssl: bool = True,
+        domain: Optional[str] = None,
+        email: Optional[str] = None,
+        cert_path: Optional[Path] = None,
+        key_path: Optional[Path] = None,
+    ):
         if len(file_path) > 4096:
             raise ValueError("File path too long (maximum 4096 characters)")
 
@@ -378,6 +564,11 @@ class RiftServer:
             raise ValueError("Path must be a file, not a directory")
 
         self.port = port
+        self.use_ssl = use_ssl
+        self.domain = domain
+        self.email = email
+        self.cert_path = cert_path
+        self.key_path = key_path
         self.http_server = None
         self.server_thread = None
         self.public_ip = None
@@ -490,8 +681,42 @@ class RiftServer:
             (bind_address, self.port), SecretFileHandler
         )
 
-        print(f"[HTTP] Serving file: {self.file_path.name}")
-        print(f"[HTTP] Listening on {bind_address}:{self.port}")
+        if self.use_ssl:
+            if self.cert_path and self.key_path:
+                cert_file = self.cert_path
+                key_file = self.key_path
+                print("[SSL] Using provided certificate")
+            elif self.domain and self.email:
+                ssl_manager = SSLCertificateManager()
+                cert_file, key_file = ssl_manager.get_letsencrypt_cert(
+                    self.domain, self.email
+                )
+            else:
+                ssl_manager = SSLCertificateManager()
+                cert_file, key_file = ssl_manager.get_self_signed_cert(
+                    self.domain or self.public_ip or "localhost"
+                )
+                print(
+                    "[SSL] WARNING: Using self-signed certificate. Browsers will show security warnings."
+                )
+
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+            self.http_server.socket = context.wrap_socket(
+                self.http_server.socket, server_side=True
+            )
+
+            protocol = "https"
+        else:
+            protocol = "http"
+            print(
+                "[WARNING] Running without SSL/TLS. All data transmitted in plaintext!"
+            )
+
+        print(f"[{protocol.upper()}] Serving file: {self.file_path.name}")
+        print(f"[{protocol.upper()}] Listening on {bind_address}:{self.port}")
 
         return self.http_server
 
@@ -541,7 +766,9 @@ class RiftServer:
 
             self._start_http_server()
 
-            public_url = f"http://{self.public_ip}:{self.port}/{self.secret_code}"
+            protocol = "https" if self.use_ssl else "http"
+            host = self.domain if self.domain else self.public_ip
+            public_url = f"{protocol}://{host}:{self.port}/{self.secret_code}"
 
             print("\n" + "=" * 60)
             print("DISPOSABLE LINK (one-time use):")
@@ -607,7 +834,32 @@ def cmd_share(args):
         port = get_random_port()
         print(f"[PORT] Using random port: {port}")
 
-    server = RiftServer(file_path=args.file, port=port)
+    use_ssl = not args.no_ssl
+    domain = args.domain
+    email = args.email
+    cert_path = Path(args.cert) if args.cert else None
+    key_path = Path(args.key) if args.key else None
+
+    if domain and not email:
+        print(
+            "Error: --email is required when using --domain for Let's Encrypt",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if (cert_path and not key_path) or (key_path and not cert_path):
+        print("Error: Both --cert and --key must be provided together", file=sys.stderr)
+        sys.exit(1)
+
+    server = RiftServer(
+        file_path=args.file,
+        port=port,
+        use_ssl=use_ssl,
+        domain=domain,
+        email=email,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
 
     server.start()
 
@@ -658,8 +910,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Share a file:
+  Share a file (HTTPS with self-signed cert):
     rift share document.pdf
+
+  Share with Let's Encrypt certificate:
+    rift share document.pdf --domain example.com --email you@example.com
+
+  Share with custom certificate:
+    rift share document.pdf --cert /path/to/cert.pem --key /path/to/key.pem
+
+  Share without SSL (not recommended):
+    rift share document.pdf --no-ssl
 
   Share on a custom port:
     rift share document.pdf --port 9000
@@ -681,6 +942,19 @@ Examples:
     share_parser.add_argument("file", help="File or directory to share")
     share_parser.add_argument(
         "-p", "--port", type=int, help="Port to listen on (default: 8000)"
+    )
+    share_parser.add_argument(
+        "--no-ssl", action="store_true", help="Disable SSL/TLS (not recommended)"
+    )
+    share_parser.add_argument(
+        "--domain", help="Domain name for Let's Encrypt certificate"
+    )
+    share_parser.add_argument(
+        "--email", help="Email for Let's Encrypt certificate (required with --domain)"
+    )
+    share_parser.add_argument("--cert", help="Path to custom SSL certificate file")
+    share_parser.add_argument(
+        "--key", help="Path to custom SSL key file (required with --cert)"
     )
     share_parser.set_defaults(func=cmd_share)
 
