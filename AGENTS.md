@@ -1,0 +1,1 @@
+- Whenever an atomic piece of work is completed, create a commit.
