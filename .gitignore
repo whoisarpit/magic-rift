@@ -38,3 +38,7 @@ Thumbs.db
 
 # Rift config
 .rift/
+
+# Environment variables
+.env
+.env.*
