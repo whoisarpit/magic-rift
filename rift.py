@@ -27,12 +27,14 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from importlib.metadata import PackageNotFoundError, version as metadata_version
-from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
-from typing import Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 from abc import ABC, abstractmethod
+from typing import Optional, Tuple
+from xml.sax.saxutils import escape as xml_escape
+
+import qrcode
 
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger(f"{__name__}.ui")
@@ -85,6 +87,39 @@ def _colorize_link(text: str) -> str:
     if not UI_COLOR_ENABLED:
         return text
     return f"{ANSI_LINK_COLOR}{text}{ANSI_RESET}"
+
+
+def _can_render_terminal_qr() -> bool:
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+        and os.getenv("TERM") != "dumb"
+    )
+
+
+def _terminal_qr(url: str) -> str:
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(url)
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+    lines = []
+
+    for row in range(0, len(matrix), 2):
+        top = matrix[row]
+        bottom = matrix[row + 1] if row + 1 < len(matrix) else [False] * len(top)
+        line = []
+        for top_pixel, bottom_pixel in zip(top, bottom):
+            if top_pixel and bottom_pixel:
+                line.append("█")
+            elif top_pixel:
+                line.append("▀")
+            elif bottom_pixel:
+                line.append("▄")
+            else:
+                line.append(" ")
+        lines.append("".join(line))
+
+    return "\n".join(lines)
 
 
 def _get_version() -> str:
@@ -1709,6 +1744,9 @@ class RiftServer:
 
             ui_logger.info("\nShare this one-time link:")
             ui_logger.info(_colorize_link(public_url))
+            if _can_render_terminal_qr():
+                ui_logger.info("\nScan in terminal:")
+                ui_logger.info(_terminal_qr(public_url))
             ui_logger.info(f"\nFile: {self.file_path.name}")
             ui_logger.info(f"Security code: {self.secret_code}")
             if self.active_method:
