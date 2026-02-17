@@ -38,31 +38,10 @@ __version__ = "0.1.2"
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger(f"{__name__}.ui")
 
-
-class ColorFormatter(logging.Formatter):
-    """Formatter that applies ANSI colors by log level when enabled."""
-
-    RESET = "\033[0m"
-    COLORS = {
-        logging.DEBUG: "\033[36m",
-        logging.INFO: "\033[32m",
-        logging.WARNING: "\033[33m",
-        logging.ERROR: "\033[31m",
-        logging.CRITICAL: "\033[35m",
-    }
-
-    def __init__(self, fmt: str, use_color: bool):
-        super().__init__(fmt)
-        self.use_color = use_color
-
-    def format(self, record: logging.LogRecord) -> str:
-        message = super().format(record)
-        if not self.use_color:
-            return message
-        color = self.COLORS.get(record.levelno)
-        if not color:
-            return message
-        return f"{color}{message}{self.RESET}"
+try:
+    from colorlog import ColoredFormatter
+except ImportError:
+    ColoredFormatter = None
 
 
 def _should_use_color(stream) -> bool:
@@ -79,21 +58,31 @@ def setup_logging(verbose: bool = False):
     """Configure logging for Rift."""
     core_level = logging.DEBUG if verbose else logging.WARNING
     ui_level = logging.DEBUG if verbose else logging.INFO
+    use_core_color = _should_use_color(sys.stderr)
 
     core_handler = logging.StreamHandler(sys.stderr)
-    core_handler.setFormatter(
-        ColorFormatter(
-            "[%(levelname)s] %(message)s", use_color=_should_use_color(sys.stderr)
+    if use_core_color and ColoredFormatter is not None:
+        core_handler.setFormatter(
+            ColoredFormatter(
+                "%(log_color)s%(levelname)s%(reset)s %(message)s",
+                log_colors={
+                    "DEBUG": "cyan",
+                    "INFO": "green",
+                    "WARNING": "yellow",
+                    "ERROR": "red",
+                    "CRITICAL": "bold_red",
+                },
+            )
         )
-    )
+    else:
+        core_handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+
     logger.handlers = [core_handler]
     logger.setLevel(core_level)
     logger.propagate = False
 
     ui_handler = logging.StreamHandler(sys.stdout)
-    ui_handler.setFormatter(
-        ColorFormatter("%(message)s", use_color=_should_use_color(sys.stdout))
-    )
+    ui_handler.setFormatter(logging.Formatter("%(message)s"))
     ui_logger.handlers = [ui_handler]
     ui_logger.setLevel(ui_level)
     ui_logger.propagate = False
@@ -1699,7 +1688,7 @@ class RiftServer:
             self.stop()
             sys.exit(0)
         except (RuntimeError, OSError, ValueError) as e:
-            logger.error(f"Error during operation: {e}")
+            logger.debug("Error during operation", exc_info=True)
             ui_logger.error(f"\nError: {e}")
             self.stop()
             sys.exit(1)
