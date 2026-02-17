@@ -12,50 +12,13 @@ Python 3.8+ required.
 pipx install magic-rift
 ```
 
-Or:
-
-```bash
-python -m pip install --user pipx
-python -m pipx ensurepath
-pipx install magic-rift
-```
-
 If you prefer `uv`:
 
 ```bash
 uv tool install magic-rift
 ```
 
-If you prefer `pip`:
-
-```bash
-pip install magic-rift
-```
-
-## Recommended Setup (Highly Recommended)
-
-Use `cloudflared` for the best reliability and easiest sharing.
-
-Why:
-
-- Usually works even when router auto-forwarding is unavailable.
-- Avoids exposing your home router directly.
-- Produces HTTPS public links through Cloudflare tunnel routing.
-
-How to set it up (cross-platform):
-
-1. Install `cloudflared` using Cloudflare's official installation guide for your OS.
-2. Confirm installation:
-
-```bash
-cloudflared --version
-```
-
-3. Share using:
-
-```bash
-rift share /path/to/file --method cloudflared
-```
+For easier and more reliable sharing, install `cloudflared` (if not already installed): https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 
 ## Quick Start
 
@@ -95,6 +58,13 @@ Disable TLS:
 rift share file.zip --no-ssl
 ```
 
+Verbose output for debugging:
+
+```bash
+rift -v share file.zip
+rift share -v file.zip
+```
+
 View config:
 
 ```bash
@@ -127,29 +97,6 @@ For most users, installing `cloudflared` gives the smoothest setup.
 - HTTPS may use a self-signed cert by default, which can show browser warnings.
 - If cert setup is unavailable, Rift can fall back to HTTP.
 - No built-in authentication. Encrypt sensitive files before sharing.
-
-## Troubleshooting
-
-Public IP detection failed:
-
-- Check your public IP manually.
-- Retry with a fixed method, for example:
-
-```bash
-rift share file.zip --method cloudflared
-```
-
-Port in use:
-
-```bash
-rift share file.zip --port 9001
-```
-
-Permission error:
-
-```bash
-chmod +r file.zip
-```
 
 ## Configuration Path
 
