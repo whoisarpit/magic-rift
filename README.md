@@ -2,7 +2,7 @@
 
 **Disposable file sharing via your public IP**
 
-Share files from your personal computer via a secure, one-time-use HTTP link. Like magic-wormhole but self-hosted. No third-party services, no SSH servers required - just direct sharing from your PC.
+Share files from your personal computer via a one-time-use link. Like magic-wormhole but self-hosted. No third-party services required for direct sharing from your PC.
 
 ## Features
 
@@ -18,7 +18,7 @@ Share files from your personal computer via a secure, one-time-use HTTP link. Li
 - **Public accessibility** via standard web browser
 - **Temporary availability** - share only when you want
 - **Cross-platform** - works on Windows, macOS, and Linux
-- **Zero install dependencies** - uses only Python standard library
+- **Python standard library core** - optional external tools for trusted certs/tunnels
 - **Simple setup** - one command to share
 
 ## How It Works
@@ -31,9 +31,10 @@ Your PC (HTTP Server) <---> Router (Auto UPnP) <---> Internet
 
 ## Prerequisites
 
-1. **Python 3.6+** installed on your local machine
+1. **Python 3.8+** installed on your local machine
 2. **UPnP enabled on your router** (most routers have this on by default) OR manual port forwarding
 3. Your PC must remain powered on during sharing
+4. **Optional:** OpenSSL installed for default self-signed HTTPS (Rift falls back to HTTP if unavailable)
 
 ## Automatic Setup (UPnP)
 
@@ -103,12 +104,12 @@ Rift - Public File Sharing
 [UPnP] Port 8758 forwarded successfully
 
 [IP] Detecting public IP address...
-[HTTP] Serving file: document.pdf
-[HTTP] Listening on port: 8758
+[HTTPS] Serving file: document.pdf
+[HTTPS] Listening on port: 8758
 
 ============================================================
 DISPOSABLE LINK (one-time use):
-  http://123.45.67.89:8758/4-crystal-salmon
+  https://123.45.67.89:8758/4-crystal-salmon
 ============================================================
 
 Your public IP: 123.45.67.89
@@ -158,7 +159,7 @@ Press `Ctrl+C` to immediately stop sharing.
 ```bash
 rift share presentation.pptx
 ```
-Output: `http://YOUR_IP:8758/7-forest-lunar` (random port, one-time use, auto-shutdown)
+Output: `https://YOUR_IP:8758/7-forest-lunar` (random port, one-time use, auto-shutdown)
 
 ### Share on custom port (bypass random)
 ```bash
@@ -189,7 +190,7 @@ Removes all saved settings. Next share will use random port again.
 ### Share Command
 
 ```bash
-rift share <file-or-directory> [options]
+rift share <file> [options]
 ```
 
 Options:
@@ -231,7 +232,8 @@ Configuration keys:
 
 ### Limitations
 
-- Plain HTTP (not HTTPS by default)
+- Trusted HTTPS is not always available automatically
+- Self-signed HTTPS will show browser warnings
 - No built-in authentication
 - No access logs (unless configured)
 - Public IP exposure
@@ -332,7 +334,7 @@ http://myshare.ddns.net:8000/file.pdf
 
 ## Configuration File
 
-Configuration is stored in `~/.rift/config.json`:
+Configuration is stored in `~/.config/rift/config.json`:
 
 ```json
 {
@@ -368,7 +370,7 @@ Configuration is stored in `~/.rift/config.json`:
 
 ## License
 
-This project is provided as-is for personal and educational use.
+MIT
 
 ## Contributing
 
@@ -383,7 +385,7 @@ A: No! Rift runs entirely on your PC. If your router supports UPnP, you don't ev
 A: Usually no! If your router supports UPnP (most modern routers do), Rift will automatically configure port forwarding. Otherwise, you'll need to manually set it up once.
 
 **Q: Is this secure?**
-A: Basic security only. It uses plain HTTP. For sensitive files, encrypt them first or add nginx with HTTPS.
+A: Basic security only. Rift can use HTTPS, but trusted certs depend on your network setup. For sensitive files, encrypt first.
 
 **Q: Can I share multiple files?**
 A: No. Disposable links only support single files for security. Share files one at a time.
@@ -401,7 +403,7 @@ A: Just re-run Rift and it will detect your new IP and give you an updated link.
 A: No! They just click the link in any web browser.
 
 **Q: Can multiple people download at once?**
-A: Yes! The HTTP server handles multiple connections.
+A: No. The first successful download consumes the one-time link and Rift shuts down.
 
 **Q: What is UPnP?**
 A: UPnP (Universal Plug and Play) is a protocol that allows devices to automatically configure port forwarding on your router. Most modern routers have it enabled by default.
