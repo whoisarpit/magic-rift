@@ -6,13 +6,13 @@ Rift starts a temporary server, prints a share link, and shuts down after the fi
 
 ## Install
 
-Python 3.8+ required.
+[pipx](https://pipx.pypa.io/stable/installation/#installing-pipx) is recommended for Python tool installation:
 
 ```bash
 pipx install magic-rift
 ```
 
-If you prefer `uv`:
+or if you prefer [uv](https://docs.astral.sh/uv/#installation), you can install with:
 
 ```bash
 uv tool install magic-rift
@@ -37,45 +37,6 @@ https://PUBLIC_IP:PORT/4-crystal-salmon
 After one successful download, the server exits and the link stops working.
 
 Stop manually anytime with `Ctrl+C`.
-
-## Most Useful Commands
-
-Recommended for easiest sharing:
-
-```bash
-rift share file.zip --method cloudflared
-```
-
-Share with automatic method selection:
-
-```bash
-rift share file.zip
-```
-
-Disable TLS:
-
-```bash
-rift share file.zip --no-ssl
-```
-
-Verbose output for debugging:
-
-```bash
-rift -v share file.zip
-rift share -v file.zip
-```
-
-View config:
-
-```bash
-rift config list
-```
-
-Reset config:
-
-```bash
-rift config reset
-```
 
 ## How Connectivity Works
 
