@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rift</title>
+    <meta
+      name="description"
+      content="Disposable public file links directly from your machine"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #141b24;
+        --ink: #e6edf3;
+        --muted: #97a6ba;
+        --accent: #f06543;
+        --accent-2: #3dd6c1;
+        --border: #273245;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 90% 10%, #3a2a1f 0, transparent 35%),
+          radial-gradient(circle at 10% 80%, #163640 0, transparent 30%),
+          var(--bg);
+        min-height: 100vh;
+      }
+
+      .wrap {
+        width: min(880px, 92vw);
+        margin: 4rem auto;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: clamp(1.2rem, 3vw, 2.2rem);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 6vw, 4.4rem);
+        line-height: 0.95;
+        letter-spacing: -0.03em;
+      }
+
+      .tagline {
+        margin: 1rem 0 0;
+        font-size: clamp(1rem, 2.3vw, 1.35rem);
+        color: var(--muted);
+      }
+
+      .cta {
+        display: inline-flex;
+        margin-top: 1.4rem;
+        padding: 0.7rem 1rem;
+        background: var(--accent);
+        color: #fff;
+        border-radius: 10px;
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      .cta:hover {
+        opacity: 0.92;
+      }
+
+      .grid {
+        margin-top: 1.4rem;
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: 1fr;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 1rem;
+        background: #1a2330;
+      }
+
+      h2 {
+        margin: 0 0 0.6rem;
+        font-size: 1.05rem;
+      }
+
+      pre {
+        margin: 0;
+        overflow-x: auto;
+        background: #0b0f14;
+        color: #dce6f2;
+        border-radius: 10px;
+        padding: 0.8rem;
+        font-size: 0.9rem;
+      }
+
+      .steps {
+        margin: 0;
+        padding-left: 1.1rem;
+      }
+
+      .steps li + li {
+        margin-top: 0.45rem;
+      }
+
+      .note {
+        margin-top: 1.1rem;
+        font-size: 0.95rem;
+        color: var(--muted);
+      }
+
+      .note a {
+        color: var(--accent-2);
+      }
+    </style>
+  </head>
+
+  <body>
+    <main class="wrap">
+      <section class="card">
+        <h1>Rift</h1>
+        <p class="tagline">
+          Disposable public file links directly from your machine.
+        </p>
+        <a class="cta" href="https://github.com/whoisarpit/magic-rift"
+          >View on GitHub</a
+        >
+
+        <div class="grid">
+          <article class="panel">
+            <h2>Install</h2>
+            <pre><code>pipx install magic-rift</code></pre>
+          </article>
+
+          <article class="panel">
+            <h2>Share</h2>
+            <pre><code>rift share /path/to/file.pdf</code></pre>
+          </article>
+
+          <article class="panel">
+            <h2>How it works</h2>
+            <ol class="steps">
+              <li>Starts a temporary server on your machine.</li>
+              <li>Prints a public one-time link.</li>
+              <li>Shuts down after one successful download.</li>
+            </ol>
+          </article>
+        </div>
+
+        <p class="note">
+          For easier sharing, install
+          <a
+            href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+            >cloudflared</a
+          >.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
