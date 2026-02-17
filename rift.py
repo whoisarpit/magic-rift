@@ -4,6 +4,8 @@ Rift - Public file sharing via your public IP
 Share files directly from your PC via HTTP link.
 """
 
+from __future__ import annotations
+
 import argparse
 import http.client
 import http.server
