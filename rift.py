@@ -39,19 +39,61 @@ logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger(f"{__name__}.ui")
 
 
+class ColorFormatter(logging.Formatter):
+    """Formatter that applies ANSI colors by log level when enabled."""
+
+    RESET = "\033[0m"
+    COLORS = {
+        logging.DEBUG: "\033[36m",
+        logging.INFO: "\033[32m",
+        logging.WARNING: "\033[33m",
+        logging.ERROR: "\033[31m",
+        logging.CRITICAL: "\033[35m",
+    }
+
+    def __init__(self, fmt: str, use_color: bool):
+        super().__init__(fmt)
+        self.use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        if not self.use_color:
+            return message
+        color = self.COLORS.get(record.levelno)
+        if not color:
+            return message
+        return f"{color}{message}{self.RESET}"
+
+
+def _should_use_color(stream) -> bool:
+    """Return whether ANSI colors should be enabled for a stream."""
+    return (
+        hasattr(stream, "isatty")
+        and stream.isatty()
+        and os.getenv("NO_COLOR") is None
+        and os.getenv("TERM") != "dumb"
+    )
+
+
 def setup_logging(verbose: bool = False):
     """Configure logging for Rift."""
     core_level = logging.DEBUG if verbose else logging.WARNING
     ui_level = logging.DEBUG if verbose else logging.INFO
 
     core_handler = logging.StreamHandler(sys.stderr)
-    core_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    core_handler.setFormatter(
+        ColorFormatter(
+            "[%(levelname)s] %(message)s", use_color=_should_use_color(sys.stderr)
+        )
+    )
     logger.handlers = [core_handler]
     logger.setLevel(core_level)
     logger.propagate = False
 
     ui_handler = logging.StreamHandler(sys.stdout)
-    ui_handler.setFormatter(logging.Formatter("%(message)s"))
+    ui_handler.setFormatter(
+        ColorFormatter("%(message)s", use_color=_should_use_color(sys.stdout))
+    )
     ui_logger.handlers = [ui_handler]
     ui_logger.setLevel(ui_level)
     ui_logger.propagate = False
