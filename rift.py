@@ -86,9 +86,15 @@ def setup_logging(verbose: bool = False):
     ui_level = logging.DEBUG if verbose else logging.INFO
     use_core_color = _should_use_color(sys.stderr)
     use_ui_color = _should_use_color(sys.stdout)
-    log_colors = {
+    core_log_colors = {
         "DEBUG": "cyan",
         "INFO": "green",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "CRITICAL": "bold_red",
+    }
+    ui_log_colors = {
+        "DEBUG": "cyan",
         "WARNING": "yellow",
         "ERROR": "red",
         "CRITICAL": "bold_red",
@@ -99,12 +105,12 @@ def setup_logging(verbose: bool = False):
         core_handler.setFormatter(
             ColoredFormatter(
                 "%(log_color)s%(levelname)s%(reset)s %(message)s",
-                log_colors=log_colors,
+                log_colors=core_log_colors,
             )
         )
     elif use_core_color:
         core_handler.setFormatter(
-            ANSIColorFormatter("%(levelname)s %(message)s", log_colors)
+            ANSIColorFormatter("%(levelname)s %(message)s", core_log_colors)
         )
     else:
         core_handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
@@ -116,10 +122,12 @@ def setup_logging(verbose: bool = False):
     ui_handler = logging.StreamHandler(sys.stdout)
     if use_ui_color and ColoredFormatter is not None:
         ui_handler.setFormatter(
-            ColoredFormatter("%(log_color)s%(message)s%(reset)s", log_colors=log_colors)
+            ColoredFormatter(
+                "%(log_color)s%(message)s%(reset)s", log_colors=ui_log_colors
+            )
         )
     elif use_ui_color:
-        ui_handler.setFormatter(ANSIColorFormatter("%(message)s", log_colors))
+        ui_handler.setFormatter(ANSIColorFormatter("%(message)s", ui_log_colors))
     else:
         ui_handler.setFormatter(logging.Formatter("%(message)s"))
     ui_logger.handlers = [ui_handler]
