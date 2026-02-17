@@ -1850,6 +1850,9 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     share_parser = subparsers.add_parser("share", help="Share a file")
+    share_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
     share_parser.add_argument("file", help="File to share")
     share_parser.add_argument(
         "-p", "--port", type=int, help="Port to listen on (default: random)"
@@ -1881,6 +1884,9 @@ Examples:
     share_parser.set_defaults(func=cmd_share)
 
     config_parser = subparsers.add_parser("config", help="Manage configuration")
+    config_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
     config_parser.add_argument(
         "action", choices=["set", "get", "list", "reset"], help="Configuration action"
     )
