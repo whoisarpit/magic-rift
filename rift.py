@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from abc import ABC, abstractmethod
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger(f"{__name__}.ui")
