@@ -1094,7 +1094,6 @@ class RiftServer:
         key_path: Optional[Path] = None,
         timeout: int = 600,
         preferred_method: Optional[str] = None,
-        verbose: bool = False,
     ):
         self.file_path = validate_file_path(Path(file_path))
 
@@ -1107,7 +1106,6 @@ class RiftServer:
         self.key_path = key_path
         self.timeout = timeout
         self.preferred_method = preferred_method
-        self.verbose = verbose
         self.http_server = None
         self.server_thread = None
         self.public_ip = None
@@ -1121,25 +1119,13 @@ class RiftServer:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def _info(self, message: str):
-        """Emit primary user-facing messages."""
-        ui_logger.info(message)
-
-    def _detail(self, message: str):
-        """Emit verbose user-facing messages."""
-        ui_logger.debug(message)
-
-    def _warn(self, message: str):
-        """Emit concise warnings for user action."""
-        ui_logger.warning(f"Warning: {message}")
-
     def _signal_handler(self, sig, frame):
         """Handle shutdown signals."""
         if self.shutting_down:
-            self._info("\nForce quit...")
+            ui_logger.info("\nForce quit...")
             os._exit(1)
         self.shutting_down = True
-        self._info("\n\nStopping share...")
+        ui_logger.info("\n\nStopping share...")
         self.stop()
         sys.exit(0)
 
@@ -1179,10 +1165,9 @@ class RiftServer:
 
             def log_message(self, format, *args):
                 """Log requests."""
-                if server_instance.verbose:
-                    ui_logger.debug(
-                        "[ACCESS] %s - %s", self.address_string(), format % args
-                    )
+                ui_logger.debug(
+                    "[ACCESS] %s - %s", self.address_string(), format % args
+                )
 
             def generate_confirmation_html(self):
                 """Generate HTML confirmation page with file details."""
@@ -1436,7 +1421,7 @@ class RiftServer:
                     with open(server_instance.file_path, "rb") as f:
                         shutil.copyfileobj(f, self.wfile, length=64 * 1024)
 
-                    server_instance._info("\nDownload complete. Closing share...")
+                    ui_logger.info("\nDownload complete. Closing share...")
 
                     server_instance.download_complete = True
 
@@ -1466,7 +1451,7 @@ class RiftServer:
                 if self.cert_path and self.key_path:
                     cert_file = self.cert_path
                     key_file = self.key_path
-                    self._detail("Using your SSL certificate.")
+                    ui_logger.debug("Using your SSL certificate.")
                 elif self.domain and self.email:
                     ssl_manager = SSLCertificateManager()
                     cert_file, key_file = ssl_manager.get_letsencrypt_cert(
@@ -1474,8 +1459,8 @@ class RiftServer:
                     )
                 elif self.email and self.public_ip:
                     sslip_domain = self.public_ip.replace(".", "-") + ".sslip.io"
-                    self._detail(f"Using automatic domain: {sslip_domain}")
-                    self._info("Getting a trusted SSL certificate...")
+                    ui_logger.debug(f"Using automatic domain: {sslip_domain}")
+                    ui_logger.info("Getting a trusted SSL certificate...")
                     ssl_manager = SSLCertificateManager()
                     cert_file, key_file = ssl_manager.get_letsencrypt_cert(
                         sslip_domain, self.email
@@ -1486,11 +1471,13 @@ class RiftServer:
                     cert_file, key_file = ssl_manager.get_self_signed_cert(
                         self.domain or self.public_ip or "localhost"
                     )
-                    self._detail(
+                    ui_logger.debug(
                         "Using a self-signed certificate (the browser may show a warning)."
                     )
                     if not self.email:
-                        self._detail("Tip: Use --email to get a trusted certificate.")
+                        ui_logger.debug(
+                            "Tip: Use --email to get a trusted certificate."
+                        )
 
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
@@ -1506,17 +1493,17 @@ class RiftServer:
                     raise
                 self.use_ssl = False
                 protocol = "http"
-                self._warn(f"SSL setup warning: {e}")
-                self._warn("Continuing without encryption.")
+                ui_logger.warning(f"SSL setup warning: {e}")
+                ui_logger.warning("Continuing without encryption.")
         else:
             protocol = "http"
             if not is_tunnel:
-                self._detail("Warning: Connection is not encrypted.")
+                ui_logger.debug("Warning: Connection is not encrypted.")
 
         if is_tunnel:
-            self._detail("Local server is ready.")
+            ui_logger.debug("Local server is ready.")
         else:
-            self._detail(
+            ui_logger.debug(
                 f"Local server is ready at {protocol}://{bind_address}:{self.port}."
             )
 
@@ -1530,7 +1517,7 @@ class RiftServer:
 
     def start(self):
         """Start the HTTP server."""
-        self._info("Starting Rift share...")
+        ui_logger.info("Starting Rift share...")
 
         file_size_mb = self.file_path.stat().st_size / (1024 * 1024)
         if file_size_mb > 10 and self.timeout == 600:
@@ -1540,11 +1527,11 @@ class RiftServer:
             suggested_timeout = int(60 + (file_size_mb * 10))
             suggested_minutes = suggested_timeout // 60
 
-            self._warn(
+            ui_logger.warning(
                 f"Large file detected ({file_size_mb:.1f} MB) with a 10-minute timeout."
             )
-            self._info("If your upload speed is slow, use a longer timeout.")
-            self._info(
+            ui_logger.info("If your upload speed is slow, use a longer timeout.")
+            ui_logger.info(
                 f"Suggested: --timeout {suggested_timeout} (about {suggested_minutes} minutes)\n"
             )
 
@@ -1558,24 +1545,24 @@ class RiftServer:
 
             if self.preferred_method:
                 if self.preferred_method.lower() not in all_methods:
-                    self._warn(
+                    ui_logger.warning(
                         f"Unknown method: {self.preferred_method}. Available: {', '.join(all_methods.keys())}"
                     )
                     sys.exit(1)
                 methods = [all_methods[self.preferred_method.lower()]]
-                self._info(f"Using connection method: {self.preferred_method}")
+                ui_logger.info(f"Using connection method: {self.preferred_method}")
             else:
                 methods = list(all_methods.values())
-                self._info("Creating a public link...")
+                ui_logger.info("Creating a public link...")
 
             for method in methods:
-                self._detail(f"Trying {method.name()}...")
+                ui_logger.debug(f"Trying {method.name()}...")
 
                 if not method.discover():
                     continue
 
                 if method.forward_port(self.port, self.timeout):
-                    self._info(f"Connected with {method.name()}.")
+                    ui_logger.info(f"Connected with {method.name()}.")
                     self.active_method = method
 
                     if (
@@ -1583,36 +1570,36 @@ class RiftServer:
                         and (self.email or self.domain)
                         and not method.is_tunnel()
                     ):
-                        self._detail("Setting up certificate support...")
+                        ui_logger.debug("Setting up certificate support...")
                         if method.forward_port(80, 300, is_port80=True):
                             self.port80_method = method
 
                     break
 
             if not self.active_method:
-                self._info("\nCould not create a public link.")
+                ui_logger.info("\nCould not create a public link.")
                 cloudflared = CloudflaredMethod()
                 cloudflared_available = cloudflared.discover()
                 suggested_command = f"rift share {shlex.quote(str(self.file_path))} --method cloudflared"
 
-                self._info("\nTry this:")
+                ui_logger.info("\nTry this:")
                 if cloudflared_available:
-                    self._info(f"  {suggested_command}")
+                    ui_logger.info(f"  {suggested_command}")
                 else:
-                    self._info("  1. Install cloudflared:")
-                    self._info(
+                    ui_logger.info("  1. Install cloudflared:")
+                    ui_logger.info(
                         "     https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
                     )
-                    self._info("  2. Retry with:")
-                    self._info(f"     {suggested_command}")
+                    ui_logger.info("  2. Retry with:")
+                    ui_logger.info(f"     {suggested_command}")
                 raise RuntimeError("No automatic public routing method available")
 
             if not self.active_method or not self.active_method.is_tunnel():
-                self._detail("Detecting your public IP...")
+                ui_logger.debug("Detecting your public IP...")
                 self.public_ip = self._get_public_ip()
 
                 if not self.public_ip:
-                    self._warn("Could not detect your public IP automatically.")
+                    ui_logger.warning("Could not detect your public IP automatically.")
                     self.public_ip = "YOUR_PUBLIC_IP"
 
             self._start_http_server()
@@ -1626,17 +1613,17 @@ class RiftServer:
                 host = self.domain if self.domain else self.public_ip
                 public_url = f"{protocol}://{host}:{self.port}/{self.secret_code}"
 
-            self._info("\nShare this one-time link:")
-            self._info(public_url)
-            self._info(f"\nFile: {self.file_path.name}")
-            self._info(f"Security code: {self.secret_code}")
+            ui_logger.info("\nShare this one-time link:")
+            ui_logger.info(public_url)
+            ui_logger.info(f"\nFile: {self.file_path.name}")
+            ui_logger.info(f"Security code: {self.secret_code}")
             if self.active_method:
                 if self.active_method.is_tunnel():
-                    self._detail(f"Connection: {self.active_method.name()} tunnel")
+                    ui_logger.debug(f"Connection: {self.active_method.name()} tunnel")
                 else:
-                    self._detail(f"Connection: {self.active_method.name()}")
+                    ui_logger.debug(f"Connection: {self.active_method.name()}")
                     if self.public_ip and self.public_ip != "YOUR_PUBLIC_IP":
-                        self._detail(f"Public IP: {self.public_ip}")
+                        ui_logger.debug(f"Public IP: {self.public_ip}")
 
             if self.active_method and not self.active_method.is_tunnel():
                 if (
@@ -1644,12 +1631,14 @@ class RiftServer:
                     and (self.email or self.domain)
                     and not self.port80_method
                 ):
-                    self._warn(
+                    ui_logger.warning(
                         "Could not set up port 80 for automatic certificate renewal."
                     )
-                    self._info("Use --method cloudflared or remove --email/--domain.")
+                    ui_logger.info(
+                        "Use --method cloudflared or remove --email/--domain."
+                    )
 
-            self._info(
+            ui_logger.info(
                 "\nWaiting for the recipient to download... Press Ctrl+C to cancel.\n"
             )
 
@@ -1664,19 +1653,19 @@ class RiftServer:
             sys.exit(0)
 
         except KeyboardInterrupt:
-            self._info("\n\nStopping share...")
+            ui_logger.info("\n\nStopping share...")
             self.stop()
             sys.exit(0)
         except (RuntimeError, OSError, ValueError) as e:
             logger.error(f"Error during operation: {e}")
-            print(f"\nError: {e}", file=sys.stderr)
+            ui_logger.error(f"\nError: {e}")
             self.stop()
             sys.exit(1)
 
     def stop(self):
         """Stop the HTTP server."""
         if self.http_server:
-            self._detail("Stopping local server...")
+            ui_logger.debug("Stopping local server...")
             try:
                 if self.server_thread and self.server_thread.is_alive():
                     self.http_server.shutdown()
@@ -1686,24 +1675,26 @@ class RiftServer:
             self.http_server = None
 
         if self.active_method:
-            self._detail(f"Cleaning up {self.active_method.name()}...")
+            ui_logger.debug(f"Cleaning up {self.active_method.name()}...")
             try:
                 if not self.active_method.cleanup(self.port):
-                    self._warn(f"Could not fully clean up {self.active_method.name()}.")
+                    ui_logger.warning(
+                        f"Could not fully clean up {self.active_method.name()}."
+                    )
             except (OSError, RuntimeError) as e:
                 logger.debug(f"Error cleaning up port {self.port}: {e}")
 
         if self.port80_method:
-            self._detail(f"Cleaning up port 80 ({self.port80_method.name()})...")
+            ui_logger.debug(f"Cleaning up port 80 ({self.port80_method.name()})...")
             try:
                 if not self.port80_method.cleanup(80, is_port80=True):
-                    self._warn(
+                    ui_logger.warning(
                         f"Could not clean up port 80 ({self.port80_method.name()})."
                     )
             except (OSError, RuntimeError) as e:
                 logger.debug(f"Error cleaning up port 80: {e}")
 
-        self._info("Share stopped.")
+        ui_logger.info("Share stopped.")
 
 
 def cmd_share(args):
@@ -1716,7 +1707,7 @@ def cmd_share(args):
         port = int(config.get("port"))
     else:
         port = get_random_port()
-        print(f"Using random port: {port}")
+        ui_logger.info(f"Using random port: {port}")
 
     use_ssl = not args.no_ssl
     domain = args.domain
@@ -1764,7 +1755,6 @@ def cmd_share(args):
         key_path=key_path,
         timeout=timeout,
         preferred_method=method,
-        verbose=getattr(args, "verbose", False),
     )
 
     server.start()
