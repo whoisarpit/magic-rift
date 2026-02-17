@@ -8,6 +8,7 @@ import argparse
 import http.client
 import http.server
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,15 +32,60 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from abc import ABC, abstractmethod
 
+__version__ = "0.1.0"
+
+logger = logging.getLogger("rift")
+
+
+def setup_logging(verbose: bool = False):
+    """Configure logging for Rift."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="[%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
 
 class RateLimiter:
     """Rate limiter to prevent brute-force attacks."""
 
-    def __init__(self, max_attempts=10, window_seconds=60):
+    def __init__(self, max_attempts=10, window_seconds=60, max_tracked_ips=1000):
         self.attempts = defaultdict(list)
         self.max_attempts = max_attempts
         self.window = timedelta(seconds=window_seconds)
         self.blocked_ips = {}
+        self.max_tracked_ips = max_tracked_ips
+
+    def _cleanup_old_entries(self):
+        """Remove old entries to prevent unbounded memory growth."""
+        now = datetime.now()
+
+        ips_to_remove = []
+        for ip, timestamps in self.attempts.items():
+            cleaned = [t for t in timestamps if now - t < self.window]
+            if cleaned:
+                self.attempts[ip] = cleaned
+            else:
+                ips_to_remove.append(ip)
+
+        for ip in ips_to_remove:
+            del self.attempts[ip]
+
+        blocked_to_remove = [
+            ip
+            for ip, blocked_at in self.blocked_ips.items()
+            if now - blocked_at >= timedelta(minutes=5)
+        ]
+        for ip in blocked_to_remove:
+            del self.blocked_ips[ip]
+
+        if len(self.attempts) > self.max_tracked_ips:
+            oldest_ips = sorted(
+                self.attempts.items(), key=lambda x: max(x[1]) if x[1] else now
+            )[: len(self.attempts) - self.max_tracked_ips]
+            for ip, _ in oldest_ips:
+                del self.attempts[ip]
 
     def is_allowed(self, ip_address):
         """Check if IP is allowed to make a request."""
@@ -60,6 +106,10 @@ class RateLimiter:
             return False
 
         self.attempts[ip_address].append(now)
+
+        if len(self.attempts) % 100 == 0:
+            self._cleanup_old_entries()
+
         return True
 
 
@@ -76,9 +126,10 @@ class SSLCertificateManager:
         key_path = self.cert_dir / "selfsigned.key"
 
         if cert_path.exists() and key_path.exists():
+            logger.debug("Using existing self-signed certificate")
             return cert_path, key_path
 
-        print("[SSL] Generating self-signed certificate...")
+        logger.info("Generating self-signed certificate...")
 
         try:
             subprocess.run(
@@ -105,15 +156,21 @@ class SSLCertificateManager:
             os.chmod(key_path, 0o600)
             os.chmod(cert_path, 0o644)
 
-            print("[SSL] Self-signed certificate generated successfully")
+            logger.info("Self-signed certificate generated successfully")
             return cert_path, key_path
 
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to generate certificate: {e.stderr.decode()}")
+            error_msg = e.stderr.decode() if e.stderr else "Unknown error"
+            logger.error(f"Failed to generate certificate: {error_msg}")
+            raise RuntimeError(f"Failed to generate certificate: {error_msg}")
         except FileNotFoundError:
+            logger.error("OpenSSL not found")
             raise RuntimeError(
                 "OpenSSL not found. Please install OpenSSL to use HTTPS."
             )
+        except OSError as e:
+            logger.error(f"OS error during certificate generation: {e}")
+            raise RuntimeError(f"Failed to generate certificate: {e}")
 
     def get_letsencrypt_cert(self, domain: str, email: str) -> Tuple[Path, Path]:
         """Obtain Let's Encrypt certificate using ACME."""
@@ -224,22 +281,41 @@ class SSLCertificateManager:
 
             return days_remaining < 30
 
-        except Exception:
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            ValueError,
+            OSError,
+        ) as e:
+            logger.debug(f"Could not check certificate expiry: {e}")
             return True
 
 
 def load_wordlist() -> Optional[list[str]]:
     """Load wordlist from bundled file."""
-    wordlist_path = Path(__file__).parent / "wordlist.txt"
+    candidate_paths = [
+        Path(__file__).parent / "wordlist.txt",
+        Path(sys.prefix) / "wordlist.txt",
+    ]
 
-    if wordlist_path.exists():
+    for wordlist_path in candidate_paths:
+        if not wordlist_path.exists():
+            continue
+
         try:
             with open(wordlist_path, "r") as f:
                 words = [line.strip() for line in f if line.strip()]
                 if len(words) >= 100:
+                    logger.debug(f"Loaded {len(words)} words from wordlist")
                     return words
-        except Exception:
-            pass
+                else:
+                    logger.warning(
+                        f"Wordlist too short ({len(words)} words), using fallback"
+                    )
+        except IOError as e:
+            logger.warning(f"Could not read wordlist: {e}, using fallback")
+        except Exception as e:
+            logger.warning(f"Unexpected error loading wordlist: {e}, using fallback")
 
     return None
 
@@ -358,6 +434,7 @@ class NATPMPMethod(PortForwardingMethod):
         """Discover NAT-PMP gateway."""
         self.gateway = get_default_gateway()
         if not self.gateway:
+            logger.debug("NAT-PMP: No default gateway found")
             return False
 
         try:
@@ -371,9 +448,16 @@ class NATPMPMethod(PortForwardingMethod):
             if len(response) >= 12:
                 version, opcode, result = struct.unpack("!BBH", response[:4])
                 if version == 0 and opcode == 128 and result == 0:
+                    logger.debug(f"NAT-PMP gateway discovered at {self.gateway}")
                     return True
-        except Exception:
-            pass
+        except socket.timeout:
+            logger.debug("NAT-PMP: Gateway discovery timed out")
+        except socket.error as e:
+            logger.debug(f"NAT-PMP: Socket error during discovery: {e}")
+        except struct.error as e:
+            logger.debug(f"NAT-PMP: Invalid response format: {e}")
+        except Exception as e:
+            logger.warning(f"NAT-PMP: Unexpected error during discovery: {e}")
 
         return False
 
@@ -404,8 +488,16 @@ class NATPMPMethod(PortForwardingMethod):
                 version, opcode_resp, result = struct.unpack("!BBH", response[:4])
                 if version == 0 and result == 0:
                     return True
-        except Exception:
-            pass
+        except socket.timeout:
+            logger.debug("NAT-PMP: Port forwarding request timed out")
+        except socket.error as e:
+            logger.debug(f"NAT-PMP: Socket error during port forwarding: {e}")
+        except struct.error as e:
+            logger.debug(
+                f"NAT-PMP: Invalid response format during port forwarding: {e}"
+            )
+        except OSError as e:
+            logger.debug(f"NAT-PMP: OS error during port forwarding: {e}")
 
         return False
 
@@ -432,8 +524,14 @@ class NATPMPMethod(PortForwardingMethod):
                 version, opcode_resp, result = struct.unpack("!BBH", response[:4])
                 if version == 0 and result == 0:
                     return True
-        except Exception:
-            pass
+        except socket.timeout:
+            logger.debug("NAT-PMP: Cleanup request timed out")
+        except socket.error as e:
+            logger.debug(f"NAT-PMP: Socket error during cleanup: {e}")
+        except struct.error as e:
+            logger.debug(f"NAT-PMP: Invalid response format during cleanup: {e}")
+        except OSError as e:
+            logger.debug(f"NAT-PMP: OS error during cleanup: {e}")
 
         return False
 
@@ -479,11 +577,15 @@ class UPnPMethod(PortForwardingMethod):
                         location = location_match.group(1).strip()
                         if self._parse_location(location):
                             self.local_ip = get_local_ip()
+                            logger.debug(f"UPnP gateway discovered at {location}")
                             return True
                 except socket.timeout:
+                    logger.debug("UPnP: Discovery timeout")
                     break
-        except Exception:
-            pass
+        except socket.error as e:
+            logger.debug(f"UPnP: Socket error during discovery: {e}")
+        except Exception as e:
+            logger.warning(f"UPnP: Unexpected error during discovery: {e}")
         finally:
             sock.close()
 
@@ -528,10 +630,19 @@ class UPnPMethod(PortForwardingMethod):
                             self.control_url = control_url_elem.text
                             if not self.control_url.startswith("/"):
                                 self.control_url = "/" + self.control_url
+                            logger.debug(
+                                f"UPnP: Found service {service_type} at {self.control_url}"
+                            )
                             return True
 
-        except Exception:
-            pass
+        except ValueError as e:
+            logger.debug(f"UPnP: Invalid location format: {e}")
+        except http.client.HTTPException as e:
+            logger.debug(f"UPnP: HTTP error parsing location: {e}")
+        except ET.ParseError as e:
+            logger.debug(f"UPnP: XML parse error: {e}")
+        except Exception as e:
+            logger.debug(f"UPnP: Error parsing location: {e}")
 
         return False
 
@@ -581,7 +692,14 @@ class UPnPMethod(PortForwardingMethod):
             conn.close()
 
             return response.status == 200
-        except Exception:
+        except ValueError as e:
+            logger.debug(f"UPnP: Invalid port number in gateway URL: {e}")
+            return False
+        except http.client.HTTPException as e:
+            logger.debug(f"UPnP: HTTP error during port forwarding: {e}")
+            return False
+        except (socket.error, OSError) as e:
+            logger.debug(f"UPnP: Network error during port forwarding: {e}")
             return False
 
     def get_public_url(self, port: int, secret_code: str, use_ssl: bool) -> str:
@@ -626,86 +744,15 @@ class UPnPMethod(PortForwardingMethod):
             conn.close()
 
             return response.status == 200
-        except Exception:
+        except ValueError as e:
+            logger.debug(f"UPnP: Invalid port number in gateway URL: {e}")
             return False
-
-
-class NgrokMethod(PortForwardingMethod):
-    """Ngrok tunnel."""
-
-    def __init__(self):
-        self.tunnel_process = None
-        self.tunnel_url = None
-
-    def name(self) -> str:
-        return "ngrok"
-
-    def is_tunnel(self) -> bool:
-        return True
-
-    def discover(self) -> bool:
-        """Check if ngrok is available."""
-        try:
-            subprocess.run(
-                ["ngrok", "version"], capture_output=True, timeout=2, check=False
-            )
-            return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except http.client.HTTPException as e:
+            logger.debug(f"UPnP: HTTP error during cleanup: {e}")
             return False
-
-    def forward_port(self, port: int, timeout: int, is_port80: bool = False) -> bool:
-        """Start ngrok tunnel."""
-        if is_port80:
-            return True
-
-        try:
-            import time
-
-            self.tunnel_process = subprocess.Popen(
-                ["ngrok", "http", str(port), "--log", "stdout"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            time.sleep(3)
-
-            try:
-                with urllib.request.urlopen(
-                    "http://127.0.0.1:4040/api/tunnels", timeout=5
-                ) as response:
-                    data = json.loads(response.read().decode())
-                    if data.get("tunnels"):
-                        self.tunnel_url = data["tunnels"][0]["public_url"]
-                        return True
-            except Exception:
-                pass
-
-        except Exception:
-            pass
-
-        return False
-
-    def get_public_url(self, port: int, secret_code: str, use_ssl: bool) -> str:
-        """Get public ngrok URL."""
-        if self.tunnel_url:
-            return f"{self.tunnel_url}/{secret_code}"
-        return None
-
-    def cleanup(self, port: int, is_port80: bool = False) -> bool:
-        """Stop ngrok tunnel."""
-        if self.tunnel_process:
-            try:
-                self.tunnel_process.terminate()
-                self.tunnel_process.wait(timeout=5)
-                return True
-            except Exception:
-                try:
-                    self.tunnel_process.kill()
-                    return True
-                except Exception:
-                    pass
-        return False
+        except (socket.error, OSError) as e:
+            logger.debug(f"UPnP: Network error during cleanup: {e}")
+            return False
 
 
 class CloudflaredMethod(PortForwardingMethod):
@@ -760,8 +807,12 @@ class CloudflaredMethod(PortForwardingMethod):
                         self.tunnel_url = match.group(0)
                         return True
 
-        except Exception:
-            pass
+        except FileNotFoundError:
+            logger.debug("cloudflared: cloudflared executable not found")
+        except PermissionError as e:
+            logger.debug(f"cloudflared: Permission denied starting cloudflared: {e}")
+        except OSError as e:
+            logger.debug(f"cloudflared: OS error starting cloudflared: {e}")
 
         return False
 
@@ -778,87 +829,115 @@ class CloudflaredMethod(PortForwardingMethod):
                 self.tunnel_process.terminate()
                 self.tunnel_process.wait(timeout=5)
                 return True
-            except Exception:
+            except subprocess.TimeoutExpired:
+                logger.debug("cloudflared: Process did not terminate, forcing kill")
                 try:
                     self.tunnel_process.kill()
                     return True
-                except Exception:
-                    pass
+                except (ProcessLookupError, PermissionError, OSError) as e:
+                    logger.debug(f"cloudflared: Error killing process: {e}")
+            except (ProcessLookupError, PermissionError, OSError) as e:
+                logger.debug(f"cloudflared: Error terminating process: {e}")
         return False
 
 
-class LocaltunnelMethod(PortForwardingMethod):
-    """Localtunnel tunnel."""
+class LocalhostRunMethod(PortForwardingMethod):
+    """Localhost.run SSH tunnel."""
 
     def __init__(self):
         self.tunnel_process = None
         self.tunnel_url = None
 
     def name(self) -> str:
-        return "localtunnel"
+        return "localhost.run"
 
     def is_tunnel(self) -> bool:
         return True
 
     def discover(self) -> bool:
-        """Check if localtunnel is available."""
+        """Check if SSH is available."""
         try:
-            subprocess.run(
-                ["lt", "--version"], capture_output=True, timeout=2, check=False
-            )
+            subprocess.run(["ssh", "-V"], capture_output=True, timeout=2, check=False)
             return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def forward_port(self, port: int, timeout: int, is_port80: bool = False) -> bool:
-        """Start localtunnel."""
+        """Start localhost.run SSH tunnel."""
         if is_port80:
             return True
 
         try:
-            result = subprocess.run(
-                ["lt", "--port", str(port)],
-                capture_output=True,
+            import time
+
+            self.tunnel_process = subprocess.Popen(
+                [
+                    "ssh",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "ServerAliveInterval=30",
+                    "-o",
+                    "ServerAliveCountMax=3",
+                    "-T",
+                    "-R",
+                    f"80:localhost:{port}",
+                    "localhost.run",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=10,
             )
 
-            if result.stdout:
-                match = re.search(r"https://[^\s]+", result.stdout)
-                if match:
-                    self.tunnel_url = match.group(0)
+            for _ in range(30):
+                time.sleep(0.5)
+                if self.tunnel_process.stdout:
+                    line = self.tunnel_process.stdout.readline()
+                    if not line:
+                        continue
 
-                    self.tunnel_process = subprocess.Popen(
-                        ["lt", "--port", str(port)],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    return True
+                    if "tunneled with tls termination" in line:
+                        match = re.search(
+                            r"https://[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]+", line
+                        )
+                        if match:
+                            self.tunnel_url = match.group(0)
+                            logger.debug(f"localhost.run: Got URL {self.tunnel_url}")
+                            return True
 
-        except Exception:
-            pass
+        except FileNotFoundError:
+            logger.debug("localhost.run: ssh executable not found")
+        except PermissionError as e:
+            logger.debug(f"localhost.run: Permission denied starting SSH: {e}")
+        except OSError as e:
+            logger.debug(f"localhost.run: OS error starting SSH tunnel: {e}")
 
         return False
 
     def get_public_url(self, port: int, secret_code: str, use_ssl: bool) -> str:
-        """Get public localtunnel URL."""
+        """Get public localhost.run URL."""
         if self.tunnel_url:
             return f"{self.tunnel_url}/{secret_code}"
         return None
 
     def cleanup(self, port: int, is_port80: bool = False) -> bool:
-        """Stop localtunnel."""
+        """Stop localhost.run SSH tunnel."""
         if self.tunnel_process:
             try:
                 self.tunnel_process.terminate()
                 self.tunnel_process.wait(timeout=5)
                 return True
-            except Exception:
+            except subprocess.TimeoutExpired:
+                logger.debug("localhost.run: Process did not terminate, forcing kill")
                 try:
                     self.tunnel_process.kill()
                     return True
-                except Exception:
-                    pass
+                except (ProcessLookupError, PermissionError, OSError) as e:
+                    logger.debug(f"localhost.run: Error killing process: {e}")
+            except (ProcessLookupError, PermissionError, OSError) as e:
+                logger.debug(f"localhost.run: Error terminating process: {e}")
         return False
 
 
@@ -873,13 +952,14 @@ def get_default_gateway() -> Optional[str]:
                     gateway_ip = socket.inet_ntoa(
                         struct.pack("<L", int(gateway_hex, 16))
                     )
+                    logger.debug(f"Found gateway via /proc/net/route: {gateway_ip}")
                     return gateway_ip
-    except Exception:
-        pass
+    except FileNotFoundError:
+        logger.debug("/proc/net/route not found (not Linux), trying netstat")
+    except Exception as e:
+        logger.debug(f"Error reading /proc/net/route: {e}")
 
     try:
-        import subprocess
-
         result = subprocess.run(
             ["netstat", "-rn"],
             capture_output=True,
@@ -892,10 +972,16 @@ def get_default_gateway() -> Optional[str]:
                 for part in parts:
                     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", part):
                         if not part.startswith("0.0.0.0"):
+                            logger.debug(f"Found gateway via netstat: {part}")
                             return part
-    except Exception:
-        pass
+    except FileNotFoundError:
+        logger.debug("netstat command not found")
+    except subprocess.TimeoutExpired:
+        logger.debug("netstat command timed out")
+    except Exception as e:
+        logger.debug(f"Error running netstat: {e}")
 
+    logger.warning("Could not detect default gateway")
     return None
 
 
@@ -907,7 +993,8 @@ def get_local_ip() -> str:
         local_ip = s.getsockname()[0]
         s.close()
         return local_ip
-    except Exception:
+    except (socket.error, OSError) as e:
+        logger.debug(f"Could not determine local IP: {e}")
         return "127.0.0.1"
 
 
@@ -926,6 +1013,65 @@ def get_random_port() -> int:
     return 8000
 
 
+def validate_file_path(file_path: Path) -> Path:
+    """Validate file path for security concerns.
+
+    Args:
+        file_path: Path to validate
+
+    Returns:
+        Resolved absolute path
+
+    Raises:
+        ValueError: If path is invalid or unsafe
+        FileNotFoundError: If file doesn't exist
+    """
+    if len(str(file_path)) > 4096:
+        raise ValueError("File path too long (maximum 4096 characters)")
+
+    # Resolve to absolute path (follows symlinks)
+    try:
+        resolved_path = file_path.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Invalid file path: {e}")
+
+    # Check if file exists and is a regular file
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    if not resolved_path.is_file():
+        raise ValueError("Path must be a file, not a directory")
+
+    # Prevent sharing of sensitive system files
+    sensitive_patterns = [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/.ssh/",
+        "/proc/",
+        "/sys/",
+        "/dev/",
+    ]
+
+    resolved_str = str(resolved_path)
+    for pattern in sensitive_patterns:
+        if pattern in resolved_str:
+            logger.warning(f"Attempt to share sensitive file: {resolved_path}")
+            raise ValueError(
+                "Cannot share system files or files in sensitive directories"
+            )
+
+    # Check file permissions - must be readable
+    if not os.access(resolved_path, os.R_OK):
+        raise PermissionError(f"File is not readable: {resolved_path}")
+
+    # Log if the original path was a symlink
+    if file_path.is_symlink():
+        logger.info(f"Following symlink: {file_path} -> {resolved_path}")
+
+    return resolved_path
+
+
 class RiftServer:
     """Main Rift server managing HTTP server."""
 
@@ -934,6 +1080,7 @@ class RiftServer:
         file_path: str,
         port: int = 8000,
         use_ssl: bool = True,
+        strict_ssl: bool = False,
         domain: Optional[str] = None,
         email: Optional[str] = None,
         cert_path: Optional[Path] = None,
@@ -941,19 +1088,11 @@ class RiftServer:
         timeout: int = 600,
         preferred_method: Optional[str] = None,
     ):
-        if len(file_path) > 4096:
-            raise ValueError("File path too long (maximum 4096 characters)")
-
-        self.file_path = Path(file_path).resolve()
-
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"File not found: {self.file_path}")
-
-        if not self.file_path.is_file():
-            raise ValueError("Path must be a file, not a directory")
+        self.file_path = validate_file_path(Path(file_path))
 
         self.port = port
         self.use_ssl = use_ssl
+        self.strict_ssl = strict_ssl
         self.domain = domain
         self.email = email
         self.cert_path = cert_path
@@ -998,7 +1137,14 @@ class RiftServer:
                     ip = response.read().decode("utf-8").strip()
                     if ip:
                         return ip
-            except Exception:
+            except urllib.error.URLError as e:
+                logger.debug(f"Could not fetch IP from {service}: {e}")
+                continue
+            except socket.timeout:
+                logger.debug(f"Timeout fetching IP from {service}")
+                continue
+            except OSError as e:
+                logger.debug(f"Network error fetching IP from {service}: {e}")
                 continue
 
         return None
@@ -1016,8 +1162,10 @@ class RiftServer:
 
             def generate_confirmation_html(self):
                 """Generate HTML confirmation page with file details."""
+                import html as html_module
+
                 file_size = server_instance.file_path.stat().st_size
-                file_name = server_instance.file_path.name
+                file_name = html_module.escape(server_instance.file_path.name)
 
                 # Format file size
                 if file_size < 1024:
@@ -1031,9 +1179,9 @@ class RiftServer:
 
                 # Guess file type
                 content_type, _ = mimetypes.guess_type(str(server_instance.file_path))
-                file_type = content_type or "Unknown"
+                file_type = html_module.escape(content_type or "Unknown")
 
-                html = f"""<!DOCTYPE html>
+                html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1212,7 +1360,7 @@ class RiftServer:
     </div>
 </body>
 </html>"""
-                return html
+                return html_content
 
             def do_GET(self):
                 """Handle GET request."""
@@ -1242,9 +1390,7 @@ class RiftServer:
             def serve_file(self):
                 """Serve the actual file and mark download complete."""
                 try:
-                    with open(server_instance.file_path, "rb") as f:
-                        file_size = server_instance.file_path.stat().st_size
-                        content = f.read()
+                    file_size = server_instance.file_path.stat().st_size
 
                     self.send_response(200)
 
@@ -1262,7 +1408,9 @@ class RiftServer:
                         f'attachment; filename="{server_instance.file_path.name}"',
                     )
                     self.end_headers()
-                    self.wfile.write(content)
+
+                    with open(server_instance.file_path, "rb") as f:
+                        shutil.copyfileobj(f, self.wfile, length=64 * 1024)
 
                     print("\n[SUCCESS] File downloaded successfully!")
                     print("[INFO] Shutting down server...")
@@ -1272,13 +1420,16 @@ class RiftServer:
                     threading.Thread(target=server_instance.stop, daemon=True).start()
 
                 except FileNotFoundError:
-                    print(f"[ERROR] File not found: {server_instance.file_path}")
+                    logger.error(f"File not found: {server_instance.file_path}")
                     self.send_error(404, "File not available")
                 except PermissionError:
-                    print(f"[ERROR] Permission denied: {server_instance.file_path}")
+                    logger.error(f"Permission denied: {server_instance.file_path}")
                     self.send_error(403, "Access denied")
-                except Exception as e:
-                    print(f"[ERROR] Error serving file: {e}")
+                except OSError as e:
+                    logger.error(f"OS error serving file: {e}")
+                    self.send_error(500, "Internal server error")
+                except IOError as e:
+                    logger.error(f"I/O error serving file: {e}")
                     self.send_error(500, "Internal server error")
 
         is_tunnel = self.active_method and self.active_method.is_tunnel()
@@ -1288,48 +1439,61 @@ class RiftServer:
         )
 
         if self.use_ssl and not is_tunnel:
-            if self.cert_path and self.key_path:
-                cert_file = self.cert_path
-                key_file = self.key_path
-                print("[SSL] Using provided certificate")
-            elif self.domain and self.email:
-                ssl_manager = SSLCertificateManager()
-                cert_file, key_file = ssl_manager.get_letsencrypt_cert(
-                    self.domain, self.email
-                )
-            elif self.email and self.public_ip:
-                sslip_domain = self.public_ip.replace(".", "-") + ".sslip.io"
-                print(f"[SSL] Using automatic domain: {sslip_domain}")
-                print(
-                    "[SSL] Obtaining Let's Encrypt certificate (requires port 80 accessible)..."
-                )
-                ssl_manager = SSLCertificateManager()
-                cert_file, key_file = ssl_manager.get_letsencrypt_cert(
-                    sslip_domain, self.email
-                )
-                self.domain = sslip_domain
-            else:
-                ssl_manager = SSLCertificateManager()
-                cert_file, key_file = ssl_manager.get_self_signed_cert(
-                    self.domain or self.public_ip or "localhost"
-                )
-                print(
-                    "[SSL] WARNING: Using self-signed certificate. Browsers will show security warnings."
-                )
-                if not self.email:
-                    print(
-                        "[SSL] TIP: Use --email to get a trusted certificate automatically via sslip.io"
+            try:
+                if self.cert_path and self.key_path:
+                    cert_file = self.cert_path
+                    key_file = self.key_path
+                    print("[SSL] Using provided certificate")
+                elif self.domain and self.email:
+                    ssl_manager = SSLCertificateManager()
+                    cert_file, key_file = ssl_manager.get_letsencrypt_cert(
+                        self.domain, self.email
                     )
+                elif self.email and self.public_ip:
+                    sslip_domain = self.public_ip.replace(".", "-") + ".sslip.io"
+                    print(f"[SSL] Using automatic domain: {sslip_domain}")
+                    print(
+                        "[SSL] Obtaining Let's Encrypt certificate (requires port 80 accessible)..."
+                    )
+                    ssl_manager = SSLCertificateManager()
+                    cert_file, key_file = ssl_manager.get_letsencrypt_cert(
+                        sslip_domain, self.email
+                    )
+                    self.domain = sslip_domain
+                else:
+                    ssl_manager = SSLCertificateManager()
+                    cert_file, key_file = ssl_manager.get_self_signed_cert(
+                        self.domain or self.public_ip or "localhost"
+                    )
+                    print(
+                        "[SSL] WARNING: Using self-signed certificate. Browsers will show security warnings."
+                    )
+                    if not self.email:
+                        print(
+                            "[SSL] TIP: Use --email to get a trusted certificate automatically via sslip.io"
+                        )
 
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
 
-            self.http_server.socket = context.wrap_socket(
-                self.http_server.socket, server_side=True
-            )
+                self.http_server.socket = context.wrap_socket(
+                    self.http_server.socket, server_side=True
+                )
 
-            protocol = "https"
+                protocol = "https"
+            except RuntimeError as e:
+                if self.strict_ssl:
+                    raise
+                self.use_ssl = False
+                protocol = "http"
+                print(f"[SSL] Warning: {e}")
+                print(
+                    "[SSL] Falling back to HTTP. Install OpenSSL to enable default HTTPS."
+                )
+                print(
+                    "[WARNING] Running without SSL/TLS. All data transmitted in plaintext!"
+                )
         else:
             protocol = "http"
             if not is_tunnel:
@@ -1362,6 +1526,12 @@ class RiftServer:
 
         file_size_mb = self.file_path.stat().st_size / (1024 * 1024)
         if file_size_mb > 10 and self.timeout == 600:
+            # Calculate timeout based on 250 KB/s transfer speed with safety margin
+            # Formula: 60s base + (file_size_MB * 10s)
+            # This assumes: 250 KB/s ≈ 4s per MB, with 2.5x safety margin
+            suggested_timeout = int(60 + (file_size_mb * 10))
+            suggested_minutes = suggested_timeout // 60
+
             print(
                 f"\n[WARNING] File size is {file_size_mb:.1f} MB, but port timeout is only 10 minutes."
             )
@@ -1369,16 +1539,15 @@ class RiftServer:
                 "[WARNING] For large files, consider using --timeout to extend the port forwarding duration."
             )
             print(
-                f"[WARNING] Example: --timeout {int(file_size_mb * 60)} (approx 1 min per MB)\n"
+                f"[WARNING] Suggested timeout: --timeout {suggested_timeout} (≈{suggested_minutes} min, based on 250 KB/s transfer)\n"
             )
 
         try:
             all_methods = {
+                "cloudflared": CloudflaredMethod(),
                 "natpmp": NATPMPMethod(),
                 "upnp": UPnPMethod(),
-                "ngrok": NgrokMethod(),
-                "cloudflared": CloudflaredMethod(),
-                "localtunnel": LocaltunnelMethod(),
+                "localhost.run": LocalhostRunMethod(),
             }
 
             if self.preferred_method:
@@ -1437,10 +1606,14 @@ class RiftServer:
                     print("  - Port 80 for Let's Encrypt")
                 else:
                     print(f"  - Port {self.port} for file sharing")
-                print("\nOr install a tunnel tool:")
-                print("  - ngrok: brew install ngrok (or download from ngrok.com)")
-                print("  - cloudflared: brew install cloudflared")
-                print("  - localtunnel: npm install -g localtunnel")
+                print("\nOr use these methods (in order of priority):")
+                print(
+                    "  - cloudflared: brew install cloudflared (best security + speed)"
+                )
+                print("  - NAT-PMP/UPnP: automatic (fastest, but exposes your IP)")
+                print(
+                    "  - localhost.run: uses SSH (secure but slower, already installed)"
+                )
 
             if not self.active_method or not self.active_method.is_tunnel():
                 print("\n[IP] Detecting public IP address...")
@@ -1479,16 +1652,6 @@ class RiftServer:
             print(f"File: {self.file_path.name}")
 
             if self.active_method and not self.active_method.is_tunnel():
-                if not self.active_method:
-                    print("\nNote: Automatic port forwarding not available.")
-                    print(
-                        f"      Make sure port {self.port} is manually forwarded in your router."
-                    )
-                    if self.use_ssl and (self.email or self.domain):
-                        print(
-                            "      Also forward port 80 for Let's Encrypt certificate."
-                        )
-
                 if (
                     self.use_ssl
                     and (self.email or self.domain)
@@ -1513,7 +1676,12 @@ class RiftServer:
             time.sleep(1)
             sys.exit(0)
 
-        except Exception as e:
+        except KeyboardInterrupt:
+            print("\n\nShutting down Rift...")
+            self.stop()
+            sys.exit(0)
+        except (RuntimeError, OSError, ValueError) as e:
+            logger.error(f"Error during operation: {e}")
             print(f"\nError: {e}", file=sys.stderr)
             self.stop()
             sys.exit(1)
@@ -1526,8 +1694,8 @@ class RiftServer:
                 if self.server_thread and self.server_thread.is_alive():
                     self.http_server.shutdown()
                 self.http_server.server_close()
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as e:
+                logger.debug(f"Error stopping HTTP server: {e}")
             self.http_server = None
 
         if self.active_method:
@@ -1541,8 +1709,8 @@ class RiftServer:
                     print(
                         f"[{self.active_method.name()}] Warning: Could not clean up port {self.port}"
                     )
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as e:
+                logger.debug(f"Error cleaning up port {self.port}: {e}")
 
         if self.port80_method:
             print(f"[{self.port80_method.name()}] Cleaning up port 80...")
@@ -1555,8 +1723,8 @@ class RiftServer:
                     print(
                         f"[{self.port80_method.name()}] Warning: Could not clean up port 80"
                     )
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as e:
+                logger.debug(f"Error cleaning up port 80: {e}")
 
         print("Rift stopped.")
 
@@ -1606,10 +1774,13 @@ def cmd_share(args):
         )
         sys.exit(1)
 
+    strict_ssl = bool(cert_path or key_path or domain or email)
+
     server = RiftServer(
         file_path=args.file,
         port=port,
         use_ssl=use_ssl,
+        strict_ssl=strict_ssl,
         domain=domain,
         email=email,
         cert_path=cert_path,
@@ -1674,8 +1845,8 @@ Examples:
     rift share document.pdf --email you@example.com
 
   Force a specific port forwarding method:
-    rift share document.pdf --method ngrok
-    rift share document.pdf --method upnp
+    rift share document.pdf --method cloudflared
+    rift share document.pdf --method natpmp
 
   Share large file with extended timeout:
     rift share largefile.zip --email you@example.com --timeout 3600
@@ -1703,10 +1874,15 @@ Examples:
         """,
     )
 
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
+    parser.add_argument("--version", action="version", version=f"rift {__version__}")
+
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    share_parser = subparsers.add_parser("share", help="Share a file or directory")
-    share_parser.add_argument("file", help="File or directory to share")
+    share_parser = subparsers.add_parser("share", help="Share a file")
+    share_parser.add_argument("file", help="File to share")
     share_parser.add_argument(
         "-p", "--port", type=int, help="Port to listen on (default: random)"
     )
@@ -1731,7 +1907,7 @@ Examples:
     )
     share_parser.add_argument(
         "--method",
-        choices=["natpmp", "upnp", "ngrok", "cloudflared", "localtunnel"],
+        choices=["cloudflared", "natpmp", "upnp", "localhost.run"],
         help="Force a specific port forwarding method (default: try all in order)",
     )
     share_parser.set_defaults(func=cmd_share)
@@ -1745,6 +1921,8 @@ Examples:
     config_parser.set_defaults(func=cmd_config)
 
     args = parser.parse_args()
+
+    setup_logging(verbose=getattr(args, "verbose", False))
 
     if not args.command:
         parser.print_help()
