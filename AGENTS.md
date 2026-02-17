@@ -1,1 +1,2 @@
 - Whenever an atomic piece of work is completed, create a commit.
+- Whenever publishing a new release, add good release notes by checking the diffs since the last release and summarizing the changes in a human-readable format.
