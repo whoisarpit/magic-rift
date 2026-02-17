@@ -1,6 +1,6 @@
 # Rift
 
-One-time file sharing from your machine.
+Disposable public file links directly from your machine.
 
 Rift starts a temporary server, prints a share link, and shuts down after the first successful download.
 

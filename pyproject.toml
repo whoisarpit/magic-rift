@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "magic-rift"
 version = "0.1.4"
-description = "Share files like magic - disposable file sharing via your public IP"
+description = "Disposable public file links directly from your machine"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
