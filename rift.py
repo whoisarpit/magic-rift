@@ -26,14 +26,13 @@ import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from importlib.metadata import PackageNotFoundError, version as metadata_version
 from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 from abc import ABC, abstractmethod
-
-__version__ = "0.1.2"
 
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger(f"{__name__}.ui")
@@ -86,6 +85,13 @@ def _colorize_link(text: str) -> str:
     if not UI_COLOR_ENABLED:
         return text
     return f"{ANSI_LINK_COLOR}{text}{ANSI_RESET}"
+
+
+def _get_version() -> str:
+    try:
+        return metadata_version("magic-rift")
+    except PackageNotFoundError:
+        return "dev"
 
 
 def setup_logging(verbose: bool = False):
@@ -1933,7 +1939,7 @@ Examples:
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
-    parser.add_argument("--version", action="version", version=f"rift {__version__}")
+    parser.add_argument("--version", action="version", version=f"rift {_get_version()}")
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
