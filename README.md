@@ -32,6 +32,31 @@ If you prefer `pip`:
 pip install magic-rift
 ```
 
+## Recommended Setup (Highly Recommended)
+
+Use `cloudflared` for the best reliability and easiest sharing.
+
+Why:
+
+- Usually works even when router auto-forwarding is unavailable.
+- Avoids exposing your home router directly.
+- Produces HTTPS public links through Cloudflare tunnel routing.
+
+How to set it up (cross-platform):
+
+1. Install `cloudflared` using Cloudflare's official installation guide for your OS.
+2. Confirm installation:
+
+```bash
+cloudflared --version
+```
+
+3. Share using:
+
+```bash
+rift share /path/to/file --method cloudflared
+```
+
 ## Quick Start
 
 Share a file:
@@ -52,16 +77,16 @@ Stop manually anytime with `Ctrl+C`.
 
 ## Most Useful Commands
 
-Share with random port (default):
-
-```bash
-rift share file.zip
-```
-
 Recommended for easiest sharing:
 
 ```bash
 rift share file.zip --method cloudflared
+```
+
+Share with automatic method selection:
+
+```bash
+rift share file.zip
 ```
 
 Disable TLS:
