@@ -52,6 +52,8 @@ ANSI_COLORS = {
     "bold_red": "\033[1;31m",
 }
 ANSI_RESET = "\033[0m"
+ANSI_LINK_COLOR = "\033[1;36m"
+UI_COLOR_ENABLED = False
 
 
 class ANSIColorFormatter(logging.Formatter):
@@ -80,12 +82,20 @@ def _should_use_color(stream) -> bool:
     )
 
 
+def _colorize_link(text: str) -> str:
+    if not UI_COLOR_ENABLED:
+        return text
+    return f"{ANSI_LINK_COLOR}{text}{ANSI_RESET}"
+
+
 def setup_logging(verbose: bool = False):
     """Configure logging for Rift."""
+    global UI_COLOR_ENABLED
     core_level = logging.DEBUG if verbose else logging.WARNING
     ui_level = logging.DEBUG if verbose else logging.INFO
     use_core_color = _should_use_color(sys.stderr)
     use_ui_color = _should_use_color(sys.stdout)
+    UI_COLOR_ENABLED = use_ui_color
     core_log_colors = {
         "DEBUG": "cyan",
         "INFO": "green",
@@ -1692,7 +1702,7 @@ class RiftServer:
                 public_url = f"{protocol}://{host}:{self.port}/{self.secret_code}"
 
             ui_logger.info("\nShare this one-time link:")
-            ui_logger.info(public_url)
+            ui_logger.info(_colorize_link(public_url))
             ui_logger.info(f"\nFile: {self.file_path.name}")
             ui_logger.info(f"Security code: {self.secret_code}")
             if self.active_method:
