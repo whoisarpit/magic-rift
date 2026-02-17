@@ -44,14 +44,14 @@ Stop manually anytime with `Ctrl+C`.
 
 Rift tries methods in this order:
 
-1. `cloudflared` (if installed)
-2. `natpmp`
-3. `upnp`
-4. `localhost.run` (SSH tunnel)
+1. `cloudflared` (if installed) - Fast and reliable Cloudflare tunnel
+2. `pinggy.io` (SSH tunnel) - Fastest SSH tunnel, 60-minute session limit
+3. `natpmp` - Router port forwarding
+4. `upnp` - Router port forwarding
 
 If automatic forwarding/tunneling fails, Rift exits and does not print a public link.
 
-For most users, installing `cloudflared` gives the smoothest setup.
+For most users, installing `cloudflared` gives the smoothest setup. Alternatively, `pinggy.io` offers excellent performance without any installation (uses built-in SSH, but has a 60-minute timeout on free tier).
 
 ## Security Notes
 

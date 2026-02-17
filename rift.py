@@ -977,15 +977,15 @@ class CloudflaredMethod(PortForwardingMethod):
         return False
 
 
-class LocalhostRunMethod(PortForwardingMethod):
-    """Localhost.run SSH tunnel."""
+class PinggyMethod(PortForwardingMethod):
+    """Pinggy.io SSH tunnel."""
 
     def __init__(self):
         self.tunnel_process = None
         self.tunnel_url = None
 
     def name(self) -> str:
-        return "localhost.run"
+        return "pinggy.io"
 
     def is_tunnel(self) -> bool:
         return True
@@ -999,7 +999,7 @@ class LocalhostRunMethod(PortForwardingMethod):
             return False
 
     def forward_port(self, port: int, timeout: int, is_port80: bool = False) -> bool:
-        """Start localhost.run SSH tunnel."""
+        """Start pinggy.io SSH tunnel."""
         if is_port80:
             return True
 
@@ -1009,6 +1009,8 @@ class LocalhostRunMethod(PortForwardingMethod):
             self.tunnel_process = subprocess.Popen(
                 [
                     "ssh",
+                    "-p",
+                    "443",
                     "-o",
                     "StrictHostKeyChecking=no",
                     "-o",
@@ -1017,10 +1019,14 @@ class LocalhostRunMethod(PortForwardingMethod):
                     "ServerAliveInterval=30",
                     "-o",
                     "ServerAliveCountMax=3",
+                    "-o",
+                    "ConnectTimeout=10",
+                    "-o",
+                    "BatchMode=yes",
                     "-T",
                     "-R",
-                    f"80:localhost:{port}",
-                    "localhost.run",
+                    f"0:localhost:{port}",
+                    "free.pinggy.io",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1034,46 +1040,48 @@ class LocalhostRunMethod(PortForwardingMethod):
                     if not line:
                         continue
 
-                    if "tunneled with tls termination" in line:
-                        match = re.search(
-                            r"https://[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]+", line
-                        )
-                        if match:
-                            self.tunnel_url = match.group(0)
-                            logger.debug(f"localhost.run: Got URL {self.tunnel_url}")
-                            return True
+                    logger.debug(f"pinggy.io: {line.strip()}")
+
+                    # Look for https URL in format: https://xyz.a.free.pinggy.link
+                    match = re.search(
+                        r"https://[a-zA-Z0-9\-]+\.a\.free\.pinggy\.link", line
+                    )
+                    if match:
+                        self.tunnel_url = match.group(0)
+                        logger.debug(f"pinggy.io: Got URL {self.tunnel_url}")
+                        return True
 
         except FileNotFoundError:
-            logger.debug("localhost.run: ssh executable not found")
+            logger.debug("pinggy.io: ssh executable not found")
         except PermissionError as e:
-            logger.debug(f"localhost.run: Permission denied starting SSH: {e}")
+            logger.debug(f"pinggy.io: Permission denied starting SSH: {e}")
         except OSError as e:
-            logger.debug(f"localhost.run: OS error starting SSH tunnel: {e}")
+            logger.debug(f"pinggy.io: OS error starting SSH tunnel: {e}")
 
         return False
 
     def get_public_url(self, port: int, secret_code: str, use_ssl: bool) -> str:
-        """Get public localhost.run URL."""
+        """Get public pinggy.io URL."""
         if self.tunnel_url:
             return f"{self.tunnel_url}/{secret_code}"
         return None
 
     def cleanup(self, port: int, is_port80: bool = False) -> bool:
-        """Stop localhost.run SSH tunnel."""
+        """Stop pinggy.io SSH tunnel."""
         if self.tunnel_process:
             try:
                 self.tunnel_process.terminate()
                 self.tunnel_process.wait(timeout=5)
                 return True
             except subprocess.TimeoutExpired:
-                logger.debug("localhost.run: Process did not terminate, forcing kill")
+                logger.debug("pinggy.io: Process did not terminate, forcing kill")
                 try:
                     self.tunnel_process.kill()
                     return True
                 except (ProcessLookupError, PermissionError, OSError) as e:
-                    logger.debug(f"localhost.run: Error killing process: {e}")
+                    logger.debug(f"pinggy.io: Error killing process: {e}")
             except (ProcessLookupError, PermissionError, OSError) as e:
-                logger.debug(f"localhost.run: Error terminating process: {e}")
+                logger.debug(f"pinggy.io: Error terminating process: {e}")
         return False
 
 
@@ -1667,9 +1675,9 @@ class RiftServer:
         try:
             all_methods = {
                 "cloudflared": CloudflaredMethod(),
+                "pinggy.io": PinggyMethod(),
                 "natpmp": NATPMPMethod(),
                 "upnp": UPnPMethod(),
-                "localhost.run": LocalhostRunMethod(),
             }
 
             if self.preferred_method:
@@ -1709,18 +1717,31 @@ class RiftServer:
                 ui_logger.info("\nCould not create a public link.")
                 cloudflared = CloudflaredMethod()
                 cloudflared_available = cloudflared.discover()
-                suggested_command = f"rift share {shlex.quote(str(self.file_path))} --method cloudflared"
 
-                ui_logger.info("\nTry this:")
+                ui_logger.info("\nTry one of these options:")
+
+                # Option 1: No installation required (pinggy.io)
+                ui_logger.info("  Option 1 (no installation):")
+                ui_logger.info(
+                    f"    rift share {shlex.quote(str(self.file_path))} --method pinggy.io"
+                )
+
+                # Option 2: Install cloudflared
+                ui_logger.info("\n  Option 2 (install cloudflared):")
                 if cloudflared_available:
-                    ui_logger.info(f"  {suggested_command}")
-                else:
-                    ui_logger.info("  1. Install cloudflared:")
                     ui_logger.info(
-                        "     https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+                        f"    rift share {shlex.quote(str(self.file_path))} --method cloudflared"
                     )
-                    ui_logger.info("  2. Retry with:")
-                    ui_logger.info(f"     {suggested_command}")
+                else:
+                    ui_logger.info("    1. Install cloudflared:")
+                    ui_logger.info(
+                        "       https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+                    )
+                    ui_logger.info("    2. Retry with:")
+                    ui_logger.info(
+                        f"       rift share {shlex.quote(str(self.file_path))} --method cloudflared"
+                    )
+
                 raise RuntimeError("No automatic public routing method available")
 
             if not self.active_method or not self.active_method.is_tunnel():
@@ -1946,7 +1967,7 @@ Examples:
 
   Force a specific port forwarding method:
     rift share document.pdf --method cloudflared
-    rift share document.pdf --method natpmp
+    rift share document.pdf --method pinggy.io
 
   Share large file with extended timeout:
     rift share largefile.zip --email you@example.com --timeout 3600
@@ -2010,7 +2031,7 @@ Examples:
     )
     share_parser.add_argument(
         "--method",
-        choices=["cloudflared", "natpmp", "upnp", "localhost.run"],
+        choices=["cloudflared", "pinggy.io", "natpmp", "upnp"],
         help="Force a specific port forwarding method (default: try all in order)",
     )
     share_parser.set_defaults(func=cmd_share)
