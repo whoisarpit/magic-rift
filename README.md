@@ -4,6 +4,8 @@ One-time file sharing from your machine.
 
 Rift starts a temporary server, prints a share link, and shuts down after the first successful download.
 
+This project is heavily inspired from [Magic Wormhole](https://magic-wormhole.readthedocs.io/) which I'm a massive fan of. It makes P2P file sharing stupidly simple, and its UX was a revelation for me. I built Magic Rift because there were times when asking someone to install an app or package was too much to ask and I wished I could just share a link to a file on my machine without having to upload it somewhere first.
+
 ## Install
 
 [pipx](https://pipx.pypa.io/stable/installation/#installing-pipx) is recommended for Python tool installation:
