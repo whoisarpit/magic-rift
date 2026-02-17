@@ -104,6 +104,27 @@
         font-size: 0.9rem;
       }
 
+      .code-wrap {
+        position: relative;
+      }
+
+      .copy-btn {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+        border: 1px solid var(--border);
+        background: #111927;
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 0.25rem 0.55rem;
+        font-size: 0.75rem;
+        cursor: pointer;
+      }
+
+      .copy-btn:hover {
+        background: #1b2738;
+      }
+
       .steps {
         margin: 0;
         padding-left: 1.1rem;
@@ -139,12 +160,22 @@
         <div class="grid">
           <article class="panel">
             <h2>Install</h2>
-            <pre><code>pipx install magic-rift</code></pre>
+            <div class="code-wrap">
+              <button class="copy-btn" type="button" data-copy-target="install">
+                Copy
+              </button>
+              <pre><code id="install">pipx install magic-rift</code></pre>
+            </div>
           </article>
 
           <article class="panel">
             <h2>Share</h2>
-            <pre><code>rift share /path/to/file.pdf</code></pre>
+            <div class="code-wrap">
+              <button class="copy-btn" type="button" data-copy-target="share">
+                Copy
+              </button>
+              <pre><code id="share">rift share /path/to/file.pdf</code></pre>
+            </div>
           </article>
 
           <article class="panel">
@@ -166,5 +197,28 @@
         </p>
       </section>
     </main>
+    <script>
+      const copyButtons = document.querySelectorAll("[data-copy-target]");
+      copyButtons.forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.getElementById(button.dataset.copyTarget);
+          if (!target) return;
+          const text = target.textContent ?? "";
+          try {
+            await navigator.clipboard.writeText(text);
+            const originalText = button.textContent;
+            button.textContent = "Copied";
+            setTimeout(() => {
+              button.textContent = originalText;
+            }, 1200);
+          } catch (_error) {
+            button.textContent = "Failed";
+            setTimeout(() => {
+              button.textContent = "Copy";
+            }, 1200);
+          }
+        });
+      });
+    </script>
   </body>
 </html>
