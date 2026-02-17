@@ -9,16 +9,24 @@ Rift starts a temporary server, prints a share link, and shuts down after the fi
 Python 3.8+ required.
 
 ```bash
-uv tool install magic-rift
+pipx install magic-rift
 ```
 
 Or:
 
 ```bash
-uvx magic-rift --version
+python -m pip install --user pipx
+python -m pipx ensurepath
+pipx install magic-rift
 ```
 
-Or with pip:
+If you prefer `uv`:
+
+```bash
+uv tool install magic-rift
+```
+
+If you prefer `pip`:
 
 ```bash
 pip install magic-rift
@@ -50,22 +58,16 @@ Share with random port (default):
 rift share file.zip
 ```
 
-Share on a fixed port:
+Recommended for easiest sharing:
 
 ```bash
-rift share file.zip --port 9000
+rift share file.zip --method cloudflared
 ```
 
 Disable TLS:
 
 ```bash
 rift share file.zip --no-ssl
-```
-
-Set default port:
-
-```bash
-rift config set port 9000
 ```
 
 View config:
@@ -89,7 +91,9 @@ Rift tries methods in this order:
 3. `upnp`
 4. `localhost.run` (SSH tunnel)
 
-If automatic forwarding/tunneling fails, Rift still runs locally and tells you to configure routing manually.
+If automatic forwarding/tunneling fails, Rift exits and does not print a public link.
+
+For most users, installing `cloudflared` gives the smoothest setup.
 
 ## Security Notes
 

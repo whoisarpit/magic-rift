@@ -1600,13 +1600,10 @@ class RiftServer:
 
             if not self.active_method:
                 print("\n[Port Forwarding] All methods failed")
-                print("You'll need to manually forward ports in your router")
-                if self.use_ssl and (self.email or self.domain):
-                    print(f"  - Port {self.port} for file sharing")
-                    print("  - Port 80 for Let's Encrypt")
-                else:
-                    print(f"  - Port {self.port} for file sharing")
-                print("\nOr use these methods (in order of priority):")
+                print(
+                    "No public route is available, so Rift will not start a share link."
+                )
+                print("\nTry one of these methods (in order of priority):")
                 print(
                     "  - cloudflared: brew install cloudflared (best security + speed)"
                 )
@@ -1614,6 +1611,7 @@ class RiftServer:
                 print(
                     "  - localhost.run: uses SSH (secure but slower, already installed)"
                 )
+                raise RuntimeError("No automatic public routing method available")
 
             if not self.active_method or not self.active_method.is_tunnel():
                 print("\n[IP] Detecting public IP address...")
@@ -1658,11 +1656,9 @@ class RiftServer:
                     and not self.port80_method
                 ):
                     print(
-                        "\nNote: Port 80 forwarding not available (needed for Let's Encrypt)."
+                        "\nNote: Automatic port 80 setup is unavailable (needed for Let's Encrypt)."
                     )
-                    print(
-                        "      Make sure port 80 is manually forwarded in your router."
-                    )
+                    print("      Use --method cloudflared or remove --email/--domain.")
 
             print("\nWaiting for download... (Press Ctrl+C to cancel)\n")
 
