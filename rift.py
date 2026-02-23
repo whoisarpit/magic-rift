@@ -1233,6 +1233,7 @@ class RiftServer:
         key_path: Optional[Path] = None,
         timeout: int = 600,
         preferred_method: Optional[str] = None,
+        keep_alive: bool = False,
     ):
         self.file_path = validate_file_path(Path(file_path))
 
@@ -1245,12 +1246,14 @@ class RiftServer:
         self.key_path = key_path
         self.timeout = timeout
         self.preferred_method = preferred_method
+        self.keep_alive = keep_alive
         self.http_server = None
         self.server_thread = None
         self.public_ip = None
         self.active_method: Optional[PortForwardingMethod] = None
         self.port80_method: Optional[PortForwardingMethod] = None
         self.secret_code = generate_secret_code()
+        self.download_count = 0
         self.download_complete = False
         self.rate_limiter = RateLimiter(max_attempts=10, window_seconds=60)
         self.shutting_down = False
@@ -1477,7 +1480,7 @@ class RiftServer:
     <div class="container">
         <div class="icon">📦</div>
         <h1>File Ready to Download</h1>
-        <p class="subtitle">This is a one-time download link. Click below to get your file.</p>
+        <p class="subtitle">{"Click below to download the file." if server_instance.keep_alive else "This is a one-time download link. Click below to get your file."}</p>
 
         <div class="file-info">
             <div class="info-row">
@@ -1498,9 +1501,7 @@ class RiftServer:
             Download File
         </button>
 
-        <div class="warning">
-            ⚠️ This link will expire after the file is downloaded.
-        </div>
+        {"" if server_instance.keep_alive else '<div class="warning">⚠️ This link will expire after the file is downloaded.</div>'}
 
         <div class="footer">
             Powered by Rift
@@ -1560,11 +1561,18 @@ class RiftServer:
                     with open(server_instance.file_path, "rb") as f:
                         shutil.copyfileobj(f, self.wfile, length=64 * 1024)
 
-                    ui_logger.info("\nDownload complete. Closing share...")
+                    server_instance.download_count += 1
 
-                    server_instance.download_complete = True
-
-                    threading.Thread(target=server_instance.stop, daemon=True).start()
+                    if server_instance.keep_alive:
+                        ui_logger.info(
+                            f"\nDownload #{server_instance.download_count} complete. Link is still active."
+                        )
+                    else:
+                        ui_logger.info("\nDownload complete. Closing share...")
+                        server_instance.download_complete = True
+                        threading.Thread(
+                            target=server_instance.stop, daemon=True
+                        ).start()
 
                 except FileNotFoundError:
                     logger.error(f"File not found: {server_instance.file_path}")
@@ -1793,9 +1801,12 @@ class RiftServer:
                         "Use --method cloudflared or remove --email/--domain."
                     )
 
-            ui_logger.info(
-                "\nWaiting for the recipient to download... Press Ctrl+C to cancel.\n"
-            )
+            if self.keep_alive:
+                ui_logger.info("\nLink is reusable. Press Ctrl+C to stop sharing.\n")
+            else:
+                ui_logger.info(
+                    "\nWaiting for the recipient to download... Press Ctrl+C to cancel.\n"
+                )
 
             while not self.download_complete:
                 import time
@@ -1871,6 +1882,7 @@ def cmd_share(args):
     key_path = Path(args.key) if args.key else None
     timeout = args.timeout if args.timeout else 600
     method = args.method if hasattr(args, "method") else None
+    keep_alive = args.keep_alive if hasattr(args, "keep_alive") else False
 
     if domain and not email:
         print(
@@ -1910,6 +1922,7 @@ def cmd_share(args):
         key_path=key_path,
         timeout=timeout,
         preferred_method=method,
+        keep_alive=keep_alive,
     )
 
     server.start()
@@ -1980,6 +1993,9 @@ Examples:
   Share with custom certificate:
     rift share document.pdf --cert /path/to/cert.pem --key /path/to/key.pem
 
+  Share with a reusable link (multiple downloads):
+    rift share document.pdf --keep-alive
+
   Share without SSL (not recommended):
     rift share document.pdf --no-ssl
 
@@ -2035,6 +2051,11 @@ Examples:
         "--method",
         choices=["cloudflared", "pinggy.io", "natpmp", "upnp"],
         help="Force a specific port forwarding method (default: try all in order)",
+    )
+    share_parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="Keep the link active for multiple downloads (requires Ctrl+C to stop)",
     )
     share_parser.set_defaults(func=cmd_share)
 
