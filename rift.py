@@ -1436,6 +1436,7 @@ class RiftServer:
         }}
 
         .download-btn {{
+            display: block;
             width: 100%;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -1447,15 +1448,41 @@ class RiftServer:
             cursor: pointer;
             transition: transform 0.2s, box-shadow 0.2s;
             box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            text-decoration: none;
+            text-align: center;
+            box-sizing: border-box;
         }}
 
         .download-btn:hover {{
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+            color: white;
         }}
 
         .download-btn:active {{
             transform: translateY(0);
+        }}
+
+        .copy-btn {{
+            display: block;
+            width: 100%;
+            background: #f7fafc;
+            color: #4a5568;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+            margin-top: 12px;
+            text-align: center;
+            box-sizing: border-box;
+        }}
+
+        .copy-btn:hover {{
+            background: #edf2f7;
+            border-color: #cbd5e0;
         }}
 
         .warning {{
@@ -1497,8 +1524,12 @@ class RiftServer:
             </div>
         </div>
 
-        <button class="download-btn" onclick="window.location.href='{server_instance.secret_code}/download'">
+        <a class="download-btn" href="{server_instance.secret_code}/download">
             Download File
+        </a>
+
+        <button class="copy-btn" onclick="navigator.clipboard.writeText(window.location.href).then(function(){{this.textContent='Copied!'}}.bind(this))">
+            Copy Link
         </button>
 
         {'<div class="warning">⚠️ This link will expire after the file is downloaded.</div>' if server_instance.disposable else ""}
@@ -1523,19 +1554,12 @@ class RiftServer:
                 path = parsed_path.path.strip("/")
 
                 if path == server_instance.secret_code:
-                    if server_instance.disposable:
-                        # Show confirmation page for disposable links
-                        html = self.generate_confirmation_html()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/html; charset=utf-8")
-                        self.send_header(
-                            "Content-Length", str(len(html.encode("utf-8")))
-                        )
-                        self.end_headers()
-                        self.wfile.write(html.encode("utf-8"))
-                    else:
-                        # Direct download for reusable links
-                        self.serve_file()
+                    html = self.generate_confirmation_html()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(html.encode("utf-8"))))
+                    self.end_headers()
+                    self.wfile.write(html.encode("utf-8"))
                 elif path == f"{server_instance.secret_code}/download":
                     # Serve the actual file
                     self.serve_file()
@@ -1779,12 +1803,13 @@ class RiftServer:
                 host = self.domain if self.domain else self.public_ip
                 public_url = f"{protocol}://{host}:{self.port}/{self.secret_code}"
 
-            ui_logger.info(
-                "\nShare this one-time link:"
-                if self.disposable
-                else "\nShare this download link:"
-            )
-            ui_logger.info(_colorize_link(public_url))
+            if self.disposable:
+                share_url = public_url
+                ui_logger.info("\nShare this one-time link:")
+            else:
+                share_url = f"{public_url}/download"
+                ui_logger.info("\nShare this download link:")
+            ui_logger.info(_colorize_link(share_url))
             if _can_render_terminal_qr():
                 ui_logger.info("\nScan in terminal:")
                 ui_logger.info(_terminal_qr(public_url))
