@@ -1233,7 +1233,7 @@ class RiftServer:
         key_path: Optional[Path] = None,
         timeout: int = 600,
         preferred_method: Optional[str] = None,
-        keep_alive: bool = False,
+        disposable: bool = False,
     ):
         self.file_path = validate_file_path(Path(file_path))
 
@@ -1246,7 +1246,7 @@ class RiftServer:
         self.key_path = key_path
         self.timeout = timeout
         self.preferred_method = preferred_method
-        self.keep_alive = keep_alive
+        self.disposable = disposable
         self.http_server = None
         self.server_thread = None
         self.public_ip = None
@@ -1480,7 +1480,7 @@ class RiftServer:
     <div class="container">
         <div class="icon">📦</div>
         <h1>File Ready to Download</h1>
-        <p class="subtitle">{"Click below to download the file." if server_instance.keep_alive else "This is a one-time download link. Click below to get your file."}</p>
+        <p class="subtitle">{"This is a one-time download link. Click below to get your file." if server_instance.disposable else "Click below to download the file."}</p>
 
         <div class="file-info">
             <div class="info-row">
@@ -1501,7 +1501,7 @@ class RiftServer:
             Download File
         </button>
 
-        {"" if server_instance.keep_alive else '<div class="warning">⚠️ This link will expire after the file is downloaded.</div>'}
+        {'<div class="warning">⚠️ This link will expire after the file is downloaded.</div>' if server_instance.disposable else ""}
 
         <div class="footer">
             Powered by Rift
@@ -1523,13 +1523,19 @@ class RiftServer:
                 path = parsed_path.path.strip("/")
 
                 if path == server_instance.secret_code:
-                    # Show confirmation page
-                    html = self.generate_confirmation_html()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(html.encode("utf-8"))))
-                    self.end_headers()
-                    self.wfile.write(html.encode("utf-8"))
+                    if server_instance.disposable:
+                        # Show confirmation page for disposable links
+                        html = self.generate_confirmation_html()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header(
+                            "Content-Length", str(len(html.encode("utf-8")))
+                        )
+                        self.end_headers()
+                        self.wfile.write(html.encode("utf-8"))
+                    else:
+                        # Direct download for reusable links
+                        self.serve_file()
                 elif path == f"{server_instance.secret_code}/download":
                     # Serve the actual file
                     self.serve_file()
@@ -1563,16 +1569,16 @@ class RiftServer:
 
                     server_instance.download_count += 1
 
-                    if server_instance.keep_alive:
-                        ui_logger.info(
-                            f"\nDownload #{server_instance.download_count} complete. Link is still active."
-                        )
-                    else:
+                    if server_instance.disposable:
                         ui_logger.info("\nDownload complete. Closing share...")
                         server_instance.download_complete = True
                         threading.Thread(
                             target=server_instance.stop, daemon=True
                         ).start()
+                    else:
+                        ui_logger.info(
+                            f"\nDownload #{server_instance.download_count} complete. Link is still active."
+                        )
 
                 except FileNotFoundError:
                     logger.error(f"File not found: {server_instance.file_path}")
@@ -1773,7 +1779,11 @@ class RiftServer:
                 host = self.domain if self.domain else self.public_ip
                 public_url = f"{protocol}://{host}:{self.port}/{self.secret_code}"
 
-            ui_logger.info("\nShare this one-time link:")
+            ui_logger.info(
+                "\nShare this one-time link:"
+                if self.disposable
+                else "\nShare this download link:"
+            )
             ui_logger.info(_colorize_link(public_url))
             if _can_render_terminal_qr():
                 ui_logger.info("\nScan in terminal:")
@@ -1801,12 +1811,12 @@ class RiftServer:
                         "Use --method cloudflared or remove --email/--domain."
                     )
 
-            if self.keep_alive:
-                ui_logger.info("\nLink is reusable. Press Ctrl+C to stop sharing.\n")
-            else:
+            if self.disposable:
                 ui_logger.info(
                     "\nWaiting for the recipient to download... Press Ctrl+C to cancel.\n"
                 )
+            else:
+                ui_logger.info("\nLink is reusable. Press Ctrl+C to stop sharing.\n")
 
             while not self.download_complete:
                 import time
@@ -1882,7 +1892,7 @@ def cmd_share(args):
     key_path = Path(args.key) if args.key else None
     timeout = args.timeout if args.timeout else 600
     method = args.method if hasattr(args, "method") else None
-    keep_alive = args.keep_alive if hasattr(args, "keep_alive") else False
+    disposable = args.disposable if hasattr(args, "disposable") else False
 
     if domain and not email:
         print(
@@ -1922,7 +1932,7 @@ def cmd_share(args):
         key_path=key_path,
         timeout=timeout,
         preferred_method=method,
-        keep_alive=keep_alive,
+        disposable=disposable,
     )
 
     server.start()
@@ -1993,8 +2003,8 @@ Examples:
   Share with custom certificate:
     rift share document.pdf --cert /path/to/cert.pem --key /path/to/key.pem
 
-  Share with a reusable link (multiple downloads):
-    rift share document.pdf --keep-alive
+  Share with a disposable (single-use) link:
+    rift share document.pdf --disposable
 
   Share without SSL (not recommended):
     rift share document.pdf --no-ssl
@@ -2053,9 +2063,9 @@ Examples:
         help="Force a specific port forwarding method (default: try all in order)",
     )
     share_parser.add_argument(
-        "--keep-alive",
+        "--disposable",
         action="store_true",
-        help="Keep the link active for multiple downloads (requires Ctrl+C to stop)",
+        help="Make the link single-use (expires after one download)",
     )
     share_parser.set_defaults(func=cmd_share)
 
