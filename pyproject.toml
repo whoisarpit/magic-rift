@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "magic-rift"
-version = "0.1.7"
+version = "0.1.8"
 description = "Disposable public file links directly from your machine"
 readme = "README.md"
 requires-python = ">=3.8"
